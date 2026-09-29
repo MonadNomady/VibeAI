@@ -1,0 +1,14 @@
+{
+  "name": "vibecheck",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "An interactive classroom sentiment-analysis activity.",
+  "scripts": {
+    "start": "node server.mjs",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=22.13.0"
+  }
+}

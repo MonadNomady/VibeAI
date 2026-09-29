@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="VibeCheck is an interactive sentiment-analysis lesson. Predict how words feel, then compare your read with a model."
+    />
+    <meta name="theme-color" content="#f8f6e9" />
+    <title>VibeCheck — How does AI read emotion?</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#app">Skip to activity</a>
+
+    <header class="site-header">
+      <a class="brand" href="#" aria-label="VibeCheck home">
+        <span class="brand-mark" aria-hidden="true">
+          <span></span><span></span><span></span>
+        </span>
+        <span>VibeCheck</span>
+      </a>
+
+      <nav aria-label="Activity progress">
+        <ol class="progress-list">
+          <li class="progress-step is-active" data-step="input" aria-current="step">
+            <span class="step-marker">1</span>
+            <span class="step-copy">Input <span>challenge</span></span>
+          </li>
+          <li class="progress-step" data-step="scale">
+            <span class="step-marker">2</span>
+            <span class="step-copy">Your <span>turn</span></span>
+          </li>
+          <li class="progress-step" data-step="results">
+            <span class="step-marker">3</span>
+            <span class="step-copy">AI <span>results</span></span>
+          </li>
+        </ol>
+      </nav>
+    </header>
+
+    <main id="app" tabindex="-1" aria-live="polite"></main>
+
+    <footer class="site-footer">
+      <span>VibeCheck classroom lab</span>
+      <span aria-hidden="true">✦</span>
+      <span>Submitted sentences are saved on this classroom server.</span>
+    </footer>
+
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>
