@@ -14,6 +14,8 @@ const publicFiles = new Map([
   ["/", "index.html"],
   ["/index.html", "index.html"],
   ["/app.js", "app.js"],
+  ["/emotion-model.js", "emotion-model.js"],
+  ["/emotion-worker.js", "emotion-worker.js"],
   ["/sentiment.js", "sentiment.js"],
   ["/styles.css", "styles.css"],
 ]);

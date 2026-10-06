@@ -1,8 +1,24 @@
 import { analyzeSentiment, tokenizeSentence } from "./sentiment.js";
+import {
+  EMOTION_LABELS,
+  buildRadarGeometry,
+  classifyEmotions,
+  getDominantEmotion,
+} from "./emotion-model.js";
 
 const app = document.querySelector("#app");
 const toast = document.querySelector("#toast");
 const brand = document.querySelector(".brand");
+
+const EMOTION_COLORS = {
+  anger: "#e65c54",
+  disgust: "#6c9a48",
+  fear: "#8b6db1",
+  joy: "#e3b333",
+  neutral: "#829099",
+  sadness: "#568cc3",
+  surprise: "#d579b0",
+};
 
 const challenges = [
   {
@@ -43,6 +59,14 @@ const challenges = [
   },
 ];
 
+const initialEmotionResult = () => ({
+  status: "idle",
+  sentence: "",
+  scores: null,
+  error: "",
+  progress: null,
+});
+
 const initialState = () => ({
   screen: "input",
   challengeIndex: 0,
@@ -52,10 +76,13 @@ const initialState = () => ({
   userRatings: {},
   userConfidence: 70,
   analysis: null,
+  emotionResult: initialEmotionResult(),
 });
 
 let state = initialState();
 let toastTimer;
+let emotionRunId = 0;
+let emotionAbortController = null;
 
 const escapeHtml = (value = "") =>
   String(value)
@@ -74,6 +101,17 @@ function showToast(message) {
   toast.textContent = message;
   toast.classList.add("is-visible");
   toastTimer = window.setTimeout(() => toast.classList.remove("is-visible"), 2300);
+}
+
+function cancelEmotionAnalysis() {
+  emotionRunId += 1;
+  emotionAbortController?.abort();
+  emotionAbortController = null;
+}
+
+function resetEmotionAnalysis() {
+  cancelEmotionAnalysis();
+  state.emotionResult = initialEmotionResult();
 }
 
 async function saveSentenceInput(sentence, challengeId) {
@@ -292,6 +330,7 @@ function renderInput() {
     state.tokens = tokens;
     state.userRatings = Object.fromEntries(tokens.map((token) => [token.id, 0]));
     state.analysis = null;
+    resetEmotionAnalysis();
     navigate("scale");
     showToast("Message saved to the class database.");
   });
@@ -539,6 +578,205 @@ function fallbackEmotions(score) {
   };
 }
 
+function emotionEntries(scores = {}) {
+  return EMOTION_LABELS.map((label) => ({
+    label,
+    score: clamp(Number(scores[label] ?? 0), 0, 1),
+  }));
+}
+
+function emotionRadarMarkup(scores) {
+  const geometry = buildRadarGeometry(scores, {
+    width: 340,
+    height: 300,
+    centerX: 170,
+    centerY: 145,
+    radius: 96,
+    labelOffset: 24,
+  });
+
+  return `
+    <svg class="emotion-radar" viewBox="${geometry.viewBox}" aria-hidden="true" focusable="false">
+      ${geometry.rings.map((ring) => `<polygon class="radar-grid" points="${ring.points}"></polygon>`).join("")}
+      ${geometry.axes
+        .map(
+          (axis) => `
+            <line class="radar-axis" x1="${geometry.centerX}" y1="${geometry.centerY}" x2="${axis.x}" y2="${axis.y}"></line>
+            <text class="radar-label" x="${axis.labelX}" y="${axis.labelY}" dy="0.35em">${escapeHtml(titleCase(axis.label))}</text>`,
+        )
+        .join("")}
+      <polygon class="radar-score" points="${geometry.polygon}"></polygon>
+      ${geometry.points
+        .map(
+          (point) => `<circle class="radar-dot" cx="${point.x}" cy="${point.y}" r="4" style="--emotion-color: ${EMOTION_COLORS[point.label]}"></circle>`,
+        )
+        .join("")}
+    </svg>`;
+}
+
+function emotionLoadingMarkup(progress = null) {
+  const hasProgress = Number.isFinite(progress);
+  const normalizedProgress = hasProgress ? clamp(Math.round(progress), 0, 100) : null;
+  return `
+    <div class="model-loading" aria-busy="true">
+      <div class="model-loading-head">
+        <span class="model-spinner" aria-hidden="true"></span>
+        <div>
+          <strong>Loading the neural emotion model…</strong>
+          <p id="emotion-model-status" role="status" aria-live="polite" aria-atomic="true" tabindex="-1">The word-weight result above is ready while this optional model loads.</p>
+        </div>
+      </div>
+      <div class="model-progress-row">
+        <progress id="emotion-model-progress" max="100" ${hasProgress ? `value="${normalizedProgress}"` : ""} aria-label="Emotion model download progress">${hasProgress ? normalizedProgress : 0}%</progress>
+        <span class="model-progress-value" id="emotion-model-progress-value">${hasProgress ? `${normalizedProgress}%` : "…"}</span>
+      </div>
+      <p class="model-download-note">First use downloads about 83 MB of model weights. Your browser normally caches them for later visits.</p>
+    </div>`;
+}
+
+function emotionReadyMarkup(scores) {
+  const entries = emotionEntries(scores);
+  const dominant = getDominantEmotion(scores);
+  const dominantLabel = dominant?.label ?? null;
+  const dominantScore = clamp(Number(dominant?.score ?? 0), 0, 1);
+
+  return `
+    <div class="emotion-model-callout" id="emotion-model-status" role="status" aria-live="polite" aria-atomic="true" tabindex="-1">
+      <span>Neural model’s strongest label</span>
+      <strong>${dominantLabel ? `${escapeHtml(titleCase(dominantLabel))} · ${Math.round(dominantScore * 100)}%` : "No clear label"}</strong>
+    </div>
+    <div class="emotion-model-layout">
+      <div>${emotionRadarMarkup(scores)}</div>
+      <div class="emotion-model-bars" role="list" aria-label="Neural emotion model scores">
+        ${entries
+          .map(({ label, score }) => {
+            const percent = Math.round(score * 100);
+            const color = EMOTION_COLORS[label];
+            return `
+              <div class="emotion-score-row" role="listitem" style="--bar-color: ${color}">
+                <span class="emotion-score-label"><span class="emotion-score-dot" style="--emotion-color: ${color}" aria-hidden="true"></span>${escapeHtml(titleCase(label))}</span>
+                <progress max="100" value="${(score * 100).toFixed(2)}" aria-label="${escapeHtml(titleCase(label))} model score, ${percent} percent">${percent}%</progress>
+                <span class="emotion-score-value" aria-hidden="true">${percent}%</span>
+              </div>`;
+          })
+          .join("")}
+      </div>
+    </div>
+    <p class="emotion-model-caution"><strong>Important:</strong> These are the model’s relative scores for seven possible labels—not measurements of what you actually feel. The model can misunderstand context and sarcasm.</p>
+    <p class="emotion-model-credit">Model: <a href="https://huggingface.co/j-hartmann/emotion-english-distilroberta-base" target="_blank" rel="noreferrer">Jochen Hartmann’s Emotion English DistilRoBERTa-base</a>, run in this browser using an <a href="https://huggingface.co/onnx-community/emotion-english-distilroberta-base-ONNX" target="_blank" rel="noreferrer">ONNX Community conversion</a>. The fine-tuned model card does not declare a license.</p>`;
+}
+
+function emotionErrorMarkup() {
+  return `
+    <div class="model-error">
+      <div id="emotion-model-status" role="status" aria-live="polite" aria-atomic="true" tabindex="-1">
+        <strong>The optional emotion model couldn’t load.</strong>
+        <p>Your word-weight result is still complete. A school filter, connection problem, or browser setting may have blocked the model files.</p>
+      </div>
+      <button class="model-retry-button" id="retry-emotion-model" type="button">Try loading it again</button>
+    </div>`;
+}
+
+function emotionModelContentMarkup() {
+  if (state.emotionResult.status === "ready" && state.emotionResult.scores) {
+    return emotionReadyMarkup(state.emotionResult.scores);
+  }
+  if (state.emotionResult.status === "error") return emotionErrorMarkup();
+  return emotionLoadingMarkup(state.emotionResult.progress);
+}
+
+function bindEmotionPanelActions() {
+  app.querySelector("#retry-emotion-model")?.addEventListener("click", () => {
+    void startEmotionAnalysis({ force: true });
+  });
+}
+
+function updateEmotionPanel() {
+  const content = app.querySelector("#emotion-model-content");
+  if (!content) return;
+  content.innerHTML = emotionModelContentMarkup();
+  bindEmotionPanelActions();
+}
+
+function updateEmotionProgress(progress) {
+  const progressElement = app.querySelector("#emotion-model-progress");
+  const valueElement = app.querySelector("#emotion-model-progress-value");
+  if (!progressElement || !valueElement) return;
+  progressElement.value = progress;
+  progressElement.textContent = `${progress}%`;
+  valueElement.textContent = `${progress}%`;
+  if (progress >= 100) {
+    const heading = app.querySelector(".model-loading-head strong");
+    const status = app.querySelector("#emotion-model-status");
+    if (heading) heading.textContent = "Model loaded—reading the sentence…";
+    if (status) status.textContent = "The model is loaded and is now reading the sentence.";
+  }
+}
+
+async function startEmotionAnalysis({ force = false } = {}) {
+  const sentence = state.sentence.trim();
+  if (!sentence) return;
+
+  const current = state.emotionResult;
+  const isSameSentence = current.sentence === sentence;
+  if (!force && isSameSentence && current.status !== "idle") return;
+
+  emotionAbortController?.abort();
+  const controller = new AbortController();
+  emotionAbortController = controller;
+  const runId = ++emotionRunId;
+
+  state.emotionResult = {
+    status: "loading",
+    sentence,
+    scores: null,
+    error: "",
+    progress: null,
+  };
+  updateEmotionPanel();
+  if (force) app.querySelector("#emotion-model-status")?.focus({ preventScroll: true });
+
+  try {
+    const scores = await classifyEmotions(sentence, {
+      signal: controller.signal,
+      onProgress(update) {
+        if (runId !== emotionRunId || state.sentence.trim() !== sentence) return;
+        const numericProgress = Number(update?.progress ?? update);
+        if (!Number.isFinite(numericProgress)) return;
+        const progress = clamp(Math.round(numericProgress), 0, 100);
+        if (progress === state.emotionResult.progress) return;
+        state.emotionResult.progress = progress;
+        updateEmotionProgress(progress);
+      },
+    });
+
+    if (runId !== emotionRunId || state.sentence.trim() !== sentence) return;
+    state.emotionResult = {
+      status: "ready",
+      sentence,
+      scores,
+      error: "",
+      progress: 100,
+    };
+    updateEmotionPanel();
+    if (force) app.querySelector("#emotion-model-status")?.focus({ preventScroll: true });
+  } catch (error) {
+    if (controller.signal.aborted || runId !== emotionRunId || state.sentence.trim() !== sentence) return;
+    console.warn("Optional emotion model failed:", error);
+    state.emotionResult = {
+      status: "error",
+      sentence,
+      scores: null,
+      error: "The optional emotion model could not load.",
+      progress: null,
+    };
+    updateEmotionPanel();
+    if (force) app.querySelector("#emotion-model-status")?.focus({ preventScroll: true });
+  } finally {
+    if (emotionAbortController === controller) emotionAbortController = null;
+  }
+}
+
 function renderResults() {
   const analysis = state.analysis ?? analyzeSentiment(state.sentence);
   state.analysis = analysis;
@@ -563,7 +801,7 @@ function renderResults() {
       <div class="stage-heading">
         <p class="eyebrow">Inside the model</p>
         <h1 id="results-title" tabindex="-1">Here’s how the AI read it</h1>
-        <p>Compare your instinct with a transparent classroom sentiment model.</p>
+        <p>Compare your instinct with an explainable word-weight model and a neural emotion classifier.</p>
       </div>
 
       <div class="sentence-ribbon result-quote">
@@ -575,11 +813,11 @@ function renderResults() {
         <article class="paper-card classification-card">
           <div class="classification-top">
             <div>
-              <span class="tiny-label">Final AI classification</span>
+              <span class="tiny-label">Word-weight sentiment classification</span>
               <h2 class="classification-name">${escapeHtml(label)}</h2>
               <p class="classification-summary">${escapeHtml(summary)}</p>
             </div>
-            <span class="confidence-badge">${confidence}% model confidence</span>
+            <span class="confidence-badge">${confidence}% word-model confidence</span>
           </div>
           <div class="sentiment-gauge" aria-label="Sentiment score ${formatSigned(score)} on a scale from negative one to positive one">
             <div class="gauge-track">
@@ -591,18 +829,18 @@ function renderResults() {
         </article>
 
         <aside class="paper-card comparison-card">
-          <span class="tiny-label">You vs. the model</span>
+          <span class="tiny-label">You vs. the word model</span>
           <h2>${agreement}% word agreement</h2>
           <p>How often your word labels matched the model’s direction.</p>
           <div class="comparison-score" style="--agreement: ${agreement}%"><strong>${agreement}%</strong></div>
           <div class="call-row"><span>Your call</span><span class="call-pill">${escapeHtml(call)}</span></div>
           <div class="call-row"><span>Your confidence</span><span class="call-pill">${state.userConfidence}%</span></div>
-          <div class="call-row"><span>Model’s call</span><span class="call-pill">${escapeHtml(label)}</span></div>
+          <div class="call-row"><span>Word model’s call</span><span class="call-pill">${escapeHtml(label)}</span></div>
         </aside>
       </div>
 
       <article class="paper-card weights-card section-card">
-        <span class="tiny-label"><span class="section-number">1</span>Model pipeline</span>
+        <span class="tiny-label"><span class="section-number">1</span>Transparent model pipeline</span>
         <h2>Individual token weights</h2>
         <p class="weights-intro">Each token starts with a dictionary score. Context—like negation, emphasis, or contrast—can change its final weight.</p>
         <details class="weights-details" ${window.matchMedia("(min-width: 561px)").matches ? "open" : ""}>
@@ -658,6 +896,20 @@ function renderResults() {
         </div>
       </article>
 
+      <article class="paper-card emotion-model-card section-card" id="emotion-model-card" aria-labelledby="emotion-model-title">
+        <div class="emotion-model-heading">
+          <div>
+            <span class="tiny-label"><span class="section-number">3</span>Neural model comparison</span>
+            <h2 id="emotion-model-title">Seven-emotion guess</h2>
+            <p class="emotion-model-intro">A separate DistilRoBERTa model reads the whole sentence and compares seven emotion labels. Unlike the word model, it does not expose a weight for each word.</p>
+          </div>
+          <span class="model-kind">Optional browser model</span>
+        </div>
+        <div class="emotion-model-content" id="emotion-model-content">
+          ${emotionModelContentMarkup()}
+        </div>
+      </article>
+
       <div class="results-actions">
         <button class="text-button" id="adjust-map" type="button">Adjust my word map</button>
         <button class="gradient-button" id="start-over" type="button">Try another message</button>
@@ -669,12 +921,16 @@ function renderResults() {
   app.querySelector("#adjust-map").addEventListener("click", () => navigate("scale"));
   app.querySelector("#start-over").addEventListener("click", () => {
     const challengeIndex = state.challengeIndex;
+    cancelEmotionAnalysis();
     state = initialState();
     state.challengeIndex = challengeIndex;
     render();
     focusScreenHeading();
     showToast("Fresh page, fresh vibe.");
   });
+
+  bindEmotionPanelActions();
+  void startEmotionAnalysis();
 }
 
 brand.addEventListener("click", (event) => {

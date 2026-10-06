@@ -916,7 +916,8 @@ input[type="range"] {
 .classification-card,
 .comparison-card,
 .weights-card,
-.emotion-card {
+.emotion-card,
+.emotion-model-card {
   padding: clamp(20px, 4vw, 30px);
 }
 
@@ -1015,14 +1016,16 @@ input[type="range"] {
 
 .comparison-card h2,
 .weights-card h2,
-.emotion-card h2 {
+.emotion-card h2,
+.emotion-model-card h2 {
   margin-bottom: 6px;
   font-size: 1.35rem;
 }
 
 .comparison-card > p,
 .weights-intro,
-.emotion-card > p {
+.emotion-card > p,
+.emotion-model-intro {
   color: var(--muted);
   font-size: 0.74rem;
 }
@@ -1276,6 +1279,268 @@ input[type="range"] {
   background: var(--emotion-color, var(--blue));
 }
 
+.emotion-model-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
+}
+
+.model-kind {
+  flex: 0 0 auto;
+  padding: 6px 9px;
+  border: 1.5px solid #72549b;
+  border-radius: 7px;
+  color: #5f4386;
+  background: #f3ebff;
+  font-size: 0.64rem;
+  font-weight: 900;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.emotion-model-content {
+  margin-top: 20px;
+}
+
+.model-loading,
+.model-error {
+  display: grid;
+  gap: 12px;
+  padding: clamp(18px, 4vw, 26px);
+  border: 1.5px dashed #9a7bc4;
+  border-radius: 12px;
+  background: #faf6ff;
+}
+
+.model-loading-head {
+  display: flex;
+  align-items: center;
+  gap: 13px;
+}
+
+.model-loading-head strong,
+.model-error strong {
+  display: block;
+  margin-bottom: 3px;
+  font-family: var(--marker);
+  font-size: 1.02rem;
+}
+
+.model-loading-head p,
+.model-error p,
+.model-download-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.7rem;
+}
+
+.model-spinner {
+  width: 34px;
+  height: 34px;
+  flex: 0 0 auto;
+  border: 4px solid #e5d8f6;
+  border-top-color: #72549b;
+  border-radius: 50%;
+  animation: model-spin 850ms linear infinite;
+}
+
+@keyframes model-spin {
+  to { transform: rotate(360deg); }
+}
+
+.model-progress-row {
+  display: grid;
+  grid-template-columns: 1fr 48px;
+  gap: 10px;
+  align-items: center;
+}
+
+.model-progress-row progress,
+.emotion-score-row progress {
+  width: 100%;
+  border: 1px solid #aaa89e;
+  border-radius: 99px;
+  background: var(--paper-deep);
+  color: var(--bar-color, #8b6db1);
+  accent-color: var(--bar-color, #8b6db1);
+  overflow: hidden;
+}
+
+.model-progress-row progress {
+  height: 13px;
+}
+
+.model-progress-row progress::-webkit-progress-bar,
+.emotion-score-row progress::-webkit-progress-bar {
+  background: var(--paper-deep);
+}
+
+.model-progress-row progress::-webkit-progress-value,
+.emotion-score-row progress::-webkit-progress-value {
+  border-radius: inherit;
+  background: var(--bar-color, #8b6db1);
+}
+
+.model-progress-row progress::-moz-progress-bar,
+.emotion-score-row progress::-moz-progress-bar {
+  border-radius: inherit;
+  background: var(--bar-color, #8b6db1);
+}
+
+.model-progress-value {
+  font-size: 0.68rem;
+  font-weight: 900;
+  text-align: right;
+}
+
+.model-retry-button {
+  width: fit-content;
+  min-height: 42px;
+  padding: 8px 13px;
+  border: 1.5px solid var(--ink);
+  border-radius: 8px;
+  background: var(--neutral-soft);
+  box-shadow: var(--shadow-small);
+  cursor: pointer;
+  font-size: 0.72rem;
+  font-weight: 900;
+}
+
+.model-retry-button:hover {
+  transform: translateY(-2px);
+}
+
+.emotion-model-callout {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 18px;
+  margin-bottom: 18px;
+  padding: 12px 14px;
+  border: 1.5px solid #72549b;
+  border-radius: 10px;
+  background: #f6efff;
+}
+
+.emotion-model-callout span {
+  color: var(--muted);
+  font-size: 0.68rem;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.emotion-model-callout strong {
+  font-family: var(--marker);
+  font-size: 1.35rem;
+}
+
+.emotion-model-layout {
+  display: grid;
+  grid-template-columns: minmax(280px, 0.85fr) minmax(320px, 1.15fr);
+  gap: clamp(22px, 5vw, 48px);
+  align-items: center;
+}
+
+.emotion-radar {
+  width: 100%;
+  max-width: 430px;
+  margin: 0 auto;
+  overflow: visible;
+}
+
+.radar-grid {
+  fill: rgba(139, 109, 177, 0.035);
+  stroke: #cfc4dc;
+  stroke-width: 1.2;
+}
+
+.radar-axis {
+  stroke: #c0b4ce;
+  stroke-width: 1;
+}
+
+.radar-score {
+  fill: rgba(139, 109, 177, 0.25);
+  stroke: #65498b;
+  stroke-linejoin: round;
+  stroke-width: 2.5;
+}
+
+.radar-dot {
+  fill: var(--emotion-color, #65498b);
+  stroke: #fffef8;
+  stroke-width: 1.5;
+}
+
+.radar-label {
+  fill: var(--ink);
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 800;
+  text-anchor: middle;
+}
+
+.emotion-model-bars {
+  display: grid;
+  gap: 11px;
+}
+
+.emotion-score-row {
+  display: grid;
+  grid-template-columns: 88px minmax(100px, 1fr) 46px;
+  gap: 10px;
+  align-items: center;
+  font-size: 0.69rem;
+}
+
+.emotion-score-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-weight: 800;
+}
+
+.emotion-score-dot {
+  width: 9px;
+  height: 9px;
+  flex: 0 0 auto;
+  border: 1px solid rgba(32, 34, 31, 0.5);
+  border-radius: 50%;
+  background: var(--emotion-color);
+}
+
+.emotion-score-row progress {
+  height: 11px;
+}
+
+.emotion-score-value {
+  font-weight: 900;
+  text-align: right;
+}
+
+.emotion-model-caution {
+  margin: 22px 0 0;
+  padding: 12px 14px;
+  border-left: 4px solid var(--neutral);
+  border-radius: 5px;
+  color: var(--muted);
+  background: var(--neutral-soft);
+  font-size: 0.7rem;
+}
+
+.emotion-model-credit {
+  margin: 12px 0 0;
+  color: var(--muted);
+  font-size: 0.64rem;
+}
+
+.emotion-model-credit a {
+  color: #5f4386;
+  font-weight: 800;
+}
+
 .results-actions {
   display: flex;
   align-items: center;
@@ -1343,7 +1608,8 @@ input[type="range"] {
   .step-copy span { display: none; }
   #app { width: min(100% - 34px, 720px); padding-top: 36px; }
   .confidence-card,
-  .result-grid { grid-template-columns: 1fr; }
+  .result-grid,
+  .emotion-model-layout { grid-template-columns: 1fr; }
   .mapping-preview { max-height: none; }
 }
 
@@ -1369,6 +1635,10 @@ input[type="range"] {
   .scale-help { align-items: flex-start; flex-direction: column; gap: 5px; }
   .weight-row { grid-template-columns: minmax(65px, 0.5fr) minmax(100px, 1.5fr) 52px; gap: 8px; }
   .emotion-grid { grid-template-columns: 1fr; }
+  .emotion-model-heading,
+  .emotion-model-callout { align-items: flex-start; flex-direction: column; gap: 8px; }
+  .model-kind { order: -1; }
+  .emotion-score-row { grid-template-columns: 78px minmax(80px, 1fr) 42px; gap: 7px; }
   .classification-top { flex-direction: column; }
   .confidence-badge { order: -1; }
   .results-actions { flex-direction: column; gap: 14px; }

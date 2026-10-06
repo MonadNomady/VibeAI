@@ -43,6 +43,8 @@ async function createFixture(t) {
     join(rootDirectory, "index.html"),
     "<!doctype html><html><body><main>VibeCheck fixture page</main></body></html>",
   );
+  writeFileSync(join(rootDirectory, "emotion-model.js"), "export const EMOTION_LABELS = [];\n");
+  writeFileSync(join(rootDirectory, "emotion-worker.js"), "self.onmessage = () => {};\n");
   writeFileSync(join(rootDirectory, "server.mjs"), "SERVER_FILE_MUST_NOT_BE_PUBLIC");
   writeFileSync(join(rootDirectory, "package.json"), "PACKAGE_FILE_MUST_NOT_BE_PUBLIC");
   writeFileSync(join(directory, "outside-secret.txt"), "PATH_TRAVERSAL_MUST_NOT_WORK");
@@ -212,6 +214,17 @@ test("the static root serves index.html", async (t) => {
   assert.equal(response.status, 200);
   assert.match(response.headers.get("content-type") ?? "", /^text\/html\b/i);
   assert.match(await response.text(), /VibeCheck fixture page/);
+});
+
+test("the browser emotion modules are served as JavaScript", async (t) => {
+  const { baseUrl } = await createFixture(t);
+
+  for (const path of ["/emotion-model.js", "/emotion-worker.js"]) {
+    const response = await fetch(`${baseUrl}${path}`);
+    assert.equal(response.status, 200, path);
+    assert.match(response.headers.get("content-type") ?? "", /^text\/javascript\b/i, path);
+    assert((await response.text()).length > 0, path);
+  }
 });
 
 test("private and out-of-root files cannot be served", async (t) => {
