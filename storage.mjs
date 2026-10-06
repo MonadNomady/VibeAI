@@ -1,9 +1,19 @@
-import { mkdirSync } from "node:fs";
-import { dirname, resolve } from "node:path";
-import { DatabaseSync } from "node:sqlite";
+import pg from "pg";
+
+const { Pool } = pg;
 
 const CHALLENGE_IDS = new Set(["sarcasm", "clear-vibe", "mixed"]);
 const MAX_SENTENCE_LENGTH = 240;
+const DEFAULT_POOL_SIZE = 3;
+
+const CREATE_TABLE_SQL = `
+  CREATE TABLE IF NOT EXISTS sentence_submissions (
+    id SERIAL PRIMARY KEY,
+    sentence VARCHAR(${MAX_SENTENCE_LENGTH}) NOT NULL CHECK (sentence <> ''),
+    challenge_id TEXT NOT NULL CHECK (challenge_id IN ('sarcasm', 'clear-vibe', 'mixed')),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )
+`;
 
 function normalizeSentence(sentence) {
   if (typeof sentence !== "string") {
@@ -42,6 +52,14 @@ function validateId(id) {
   return id;
 }
 
+function normalizeTimestamp(value) {
+  const timestamp = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(timestamp.getTime())) {
+    throw new TypeError("database returned an invalid creation timestamp");
+  }
+  return timestamp.toISOString();
+}
+
 function normalizeRow(row) {
   if (row === undefined) return null;
 
@@ -49,83 +67,121 @@ function normalizeRow(row) {
     id: Number(row.id),
     sentence: row.sentence,
     challengeId: row.challenge_id,
-    createdAt: row.created_at,
+    createdAt: normalizeTimestamp(row.created_at),
   };
 }
 
-export function createSentenceStore(databasePath) {
-  if (typeof databasePath !== "string" || databasePath.length === 0) {
-    throw new TypeError("databasePath must be a non-empty string");
+export function databaseUrlFromEnvironment(environment = process.env) {
+  for (const connectionString of [environment.DATABASE_URL, environment.POSTGRESQL_ADDON_URI]) {
+    if (typeof connectionString === "string" && connectionString.trim().length > 0) {
+      return connectionString.trim();
+    }
+  }
+  throw new Error(
+    "DATABASE_URL must be set to the Clever Cloud PostgreSQL connection URI.",
+  );
+}
+
+export async function createSentenceStore({ connectionString, pool } = {}) {
+  if (
+    pool === undefined
+    && (typeof connectionString !== "string" || connectionString.trim().length === 0)
+  ) {
+    throw new TypeError("connectionString must be a non-empty PostgreSQL connection URI");
   }
 
-  const resolvedPath = databasePath === ":memory:" ? databasePath : resolve(databasePath);
-  if (resolvedPath !== ":memory:") {
-    mkdirSync(dirname(resolvedPath), { recursive: true });
+  const database = pool ?? new Pool({
+    connectionString: connectionString.trim(),
+    max: DEFAULT_POOL_SIZE,
+    connectionTimeoutMillis: 10_000,
+    idleTimeoutMillis: 30_000,
+    statement_timeout: 10_000,
+    query_timeout: 12_000,
+  });
+
+  if (typeof database.query !== "function" || typeof database.end !== "function") {
+    throw new TypeError("pool must provide query() and end() methods");
   }
 
-  const database = new DatabaseSync(resolvedPath);
+  const onPoolError = (error) => {
+    console.error("Unexpected PostgreSQL connection error:", error);
+  };
+  database.on?.("error", onPoolError);
 
   try {
-    database.exec("PRAGMA journal_mode = WAL");
-    database.exec("PRAGMA synchronous = NORMAL");
-    database.exec("PRAGMA busy_timeout = 5000");
-    database.exec("PRAGMA foreign_keys = ON");
-    database.exec(`
-      CREATE TABLE IF NOT EXISTS sentence_submissions (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        sentence TEXT NOT NULL CHECK (length(sentence) BETWEEN 1 AND ${MAX_SENTENCE_LENGTH}),
-        challenge_id TEXT NOT NULL CHECK (challenge_id IN ('sarcasm', 'clear-vibe', 'mixed')),
-        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-      ) STRICT
-    `);
+    await database.query(CREATE_TABLE_SQL);
+    if (pool === undefined) {
+      try {
+        const transport = await database.query(
+          "SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()",
+        );
+        if (transport.rows[0]?.ssl === true) {
+          console.log("PostgreSQL transport security: TLS enabled.");
+        } else {
+          console.warn(
+            "PostgreSQL transport security: TLS is not enabled. Do not collect private data.",
+          );
+        }
+      } catch {
+        console.warn("PostgreSQL transport security could not be verified.");
+      }
+    }
   } catch (error) {
-    database.close();
+    await Promise.resolve().then(() => database.end()).catch(() => {});
+    database.off?.("error", onPoolError);
     throw error;
   }
 
-  const insertSentence = database.prepare(`
-    INSERT INTO sentence_submissions (sentence, challenge_id)
-    VALUES (?, ?)
-  `);
-  const selectById = database.prepare(`
-    SELECT id, sentence, challenge_id, created_at
-    FROM sentence_submissions
-    WHERE id = ?
-  `);
-  const selectCount = database.prepare(`
-    SELECT count(*) AS count
-    FROM sentence_submissions
-  `);
-
-  let closed = false;
+  let closePromise;
 
   function assertOpen() {
-    if (closed) throw new Error("sentence store is closed");
+    if (closePromise) throw new Error("sentence store is closed");
   }
 
   return {
-    saveSentence({ sentence, challengeId } = {}) {
+    async saveSentence({ sentence, challengeId } = {}) {
       assertOpen();
       const normalizedSentence = normalizeSentence(sentence);
       const normalizedChallengeId = validateChallengeId(challengeId);
-      const result = insertSentence.run(normalizedSentence, normalizedChallengeId);
-      return normalizeRow(selectById.get(result.lastInsertRowid));
+      const result = await database.query(
+        `
+          INSERT INTO sentence_submissions (sentence, challenge_id)
+          VALUES ($1, $2)
+          RETURNING id, sentence, challenge_id, created_at
+        `,
+        [normalizedSentence, normalizedChallengeId],
+      );
+      return normalizeRow(result.rows[0]);
     },
 
-    getById(id) {
+    async getById(id) {
       assertOpen();
-      return normalizeRow(selectById.get(validateId(id)));
+      const result = await database.query(
+        `
+          SELECT id, sentence, challenge_id, created_at
+          FROM sentence_submissions
+          WHERE id = $1
+        `,
+        [validateId(id)],
+      );
+      return normalizeRow(result.rows[0]);
     },
 
-    count() {
+    async count() {
       assertOpen();
-      return Number(selectCount.get().count);
+      const result = await database.query(
+        "SELECT count(*)::integer AS count FROM sentence_submissions",
+      );
+      return Number(result.rows[0].count);
     },
 
     close() {
-      if (closed) return;
-      database.close();
-      closed = true;
+      if (!closePromise) {
+        closePromise = Promise.resolve()
+          .then(() => database.end())
+          .finally(() => database.off?.("error", onPoolError));
+      }
+      return closePromise;
     },
   };
 }

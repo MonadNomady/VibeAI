@@ -3,7 +3,9 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { newDb } from "pg-mem";
 import { createVibeCheckServer } from "../server.mjs";
+import { createSentenceStore } from "../storage.mjs";
 
 function listen(server) {
   return new Promise((resolve, reject) => {
@@ -36,7 +38,6 @@ function close(server) {
 async function createFixture(t) {
   const directory = mkdtempSync(join(tmpdir(), "vibecheck-server-"));
   const rootDirectory = join(directory, "public");
-  const databasePath = join(rootDirectory, "data", "vibecheck.sqlite");
 
   mkdirSync(rootDirectory, { recursive: true });
   writeFileSync(
@@ -49,12 +50,16 @@ async function createFixture(t) {
 
   let server;
   let store;
+  let closeResources;
 
   try {
-    ({ server, store } = createVibeCheckServer({ databasePath, rootDirectory }));
+    const database = newDb({ noAstCoverageCheck: true });
+    const adapter = database.adapters.createPg();
+    store = await createSentenceStore({ pool: new adapter.Pool() });
+    ({ server, closeResources } = createVibeCheckServer({ rootDirectory, store }));
     await listen(server);
   } catch (error) {
-    store?.close();
+    await store?.close();
     rmSync(directory, { recursive: true, force: true });
     throw error;
   }
@@ -64,7 +69,7 @@ async function createFixture(t) {
       await close(server);
     } finally {
       try {
-        store.close();
+        await closeResources();
       } finally {
         rmSync(directory, { recursive: true, force: true });
       }
@@ -101,13 +106,13 @@ test("POST /api/sentences stores trimmed input and returns its identity", async 
   const result = await response.json();
   assert(Number.isSafeInteger(result.id) && result.id > 0);
   assert.match(result.createdAt, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
-  assert.deepEqual(store.getById(result.id), {
+  assert.deepEqual(await store.getById(result.id), {
     id: result.id,
     sentence: "I loved the movie, but the ending was disappointing.",
     challengeId: "mixed",
     createdAt: result.createdAt,
   });
-  assert.equal(store.count(), 1);
+  assert.equal(await store.count(), 1);
 });
 
 test("SQL-looking and Unicode sentence text is persisted literally", async (t) => {
@@ -120,9 +125,9 @@ test("SQL-looking and Unicode sentence text is persisted literally", async (t) =
 
   assert.equal(response.status, 201);
   const result = await response.json();
-  assert.equal(store.getById(result.id).sentence, sentence);
-  assert.equal(store.getById(result.id).challengeId, "clear-vibe");
-  assert.equal(store.count(), 1);
+  assert.equal((await store.getById(result.id)).sentence, sentence);
+  assert.equal((await store.getById(result.id)).challengeId, "clear-vibe");
+  assert.equal(await store.count(), 1);
 });
 
 test("invalid JSON submissions return 400 without inserting rows", async (t) => {
@@ -159,7 +164,7 @@ test("invalid JSON submissions return 400 without inserting rows", async (t) => 
 
     assert.equal(response.status, 400, name);
     await response.text();
-    assert.equal(store.count(), 0, `${name} must not insert a row`);
+    assert.equal(await store.count(), 0, `${name} must not insert a row`);
   }
 });
 
@@ -173,7 +178,7 @@ test("POST /api/sentences rejects the wrong media type", async (t) => {
 
   assert.equal(response.status, 415);
   await response.text();
-  assert.equal(store.count(), 0);
+  assert.equal(await store.count(), 0);
 });
 
 test("POST /api/sentences rejects request bodies larger than 4096 bytes", async (t) => {
@@ -192,7 +197,7 @@ test("POST /api/sentences rejects request bodies larger than 4096 bytes", async 
 
   assert.equal(response.status, 413);
   await response.text();
-  assert.equal(store.count(), 0);
+  assert.equal(await store.count(), 0);
 });
 
 test("GET /api/sentences is method-restricted", async (t) => {
@@ -202,7 +207,7 @@ test("GET /api/sentences is method-restricted", async (t) => {
   assert.equal(response.status, 405);
   assert.equal(response.headers.get("allow"), "POST");
   await response.text();
-  assert.equal(store.count(), 0);
+  assert.equal(await store.count(), 0);
 });
 
 test("the static root serves index.html", async (t) => {
@@ -217,7 +222,7 @@ test("the static root serves index.html", async (t) => {
 test("private and out-of-root files cannot be served", async (t) => {
   const { baseUrl } = await createFixture(t);
   const privatePaths = [
-    "/data/vibecheck.sqlite",
+    "/storage.mjs",
     "/server.mjs",
     "/package.json",
     "/%2e%2e%2foutside-secret.txt",

@@ -1,41 +1,52 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { createSentenceStore } from "../storage.mjs";
+import { newDb } from "pg-mem";
+import {
+  createSentenceStore,
+  databaseUrlFromEnvironment,
+} from "../storage.mjs";
 
-function createTemporaryDatabase(t) {
-  const directory = mkdtempSync(join(tmpdir(), "vibecheck-store-"));
-  t.after(() => rmSync(directory, { recursive: true, force: true }));
-  return join(directory, "nested", "vibecheck.sqlite");
+function createPool(database) {
+  const adapter = database.adapters.createPg();
+  return new adapter.Pool();
 }
 
-test("sentences persist after the database is closed and reopened", (t) => {
-  const databasePath = createTemporaryDatabase(t);
-  const firstStore = createSentenceStore(databasePath);
-  const saved = firstStore.saveSentence({
+function createMemoryDatabase() {
+  return newDb({ noAstCoverageCheck: true });
+}
+
+async function createTestStore(t, database = createMemoryDatabase()) {
+  const store = await createSentenceStore({ pool: createPool(database) });
+  t.after(() => store.close());
+  return { database, store };
+}
+
+test("sentences persist when the store reconnects to the same database", async () => {
+  const database = createMemoryDatabase();
+  const firstStore = await createSentenceStore({ pool: createPool(database) });
+  const saved = await firstStore.saveSentence({
     sentence: "Today has been calm, sunny, and lovely.",
     challengeId: "clear-vibe",
   });
 
   assert.equal(saved.id, 1);
-  assert.equal(firstStore.count(), 1);
-  firstStore.close();
+  assert.equal(await firstStore.count(), 1);
+  await firstStore.close();
 
-  const reopenedStore = createSentenceStore(databasePath);
-  t.after(() => reopenedStore.close());
-
-  assert.equal(reopenedStore.count(), 1);
-  assert.deepEqual(reopenedStore.getById(saved.id), saved);
+  const reopenedStore = await createSentenceStore({ pool: createPool(database) });
+  try {
+    assert.equal(await reopenedStore.count(), 1);
+    assert.deepEqual(await reopenedStore.getById(saved.id), saved);
+  } finally {
+    await reopenedStore.close();
+  }
 });
 
-test("saveSentence trims input and records a UTC ISO timestamp", (t) => {
-  const store = createSentenceStore(":memory:");
-  t.after(() => store.close());
+test("saveSentence trims input and records a UTC ISO timestamp", async (t) => {
+  const { store } = await createTestStore(t);
   const before = Date.now();
 
-  const saved = store.saveSentence({
+  const saved = await store.saveSentence({
     sentence: "  I loved the movie, but the ending was disappointing.  ",
     challengeId: "mixed",
   });
@@ -48,53 +59,81 @@ test("saveSentence trims input and records a UTC ISO timestamp", (t) => {
   assert(timestamp >= before - 1_000 && timestamp <= after + 1_000);
 });
 
-test("validation rejects empty, oversized, and unknown-challenge submissions", (t) => {
-  const store = createSentenceStore(":memory:");
-  t.after(() => store.close());
+test("validation rejects empty, oversized, and unknown-challenge submissions", async (t) => {
+  const { store } = await createTestStore(t);
 
-  assert.throws(
-    () => store.saveSentence({ sentence: " \n\t ", challengeId: "sarcasm" }),
+  await assert.rejects(
+    store.saveSentence({ sentence: " \n\t ", challengeId: "sarcasm" }),
     /must not be empty/,
   );
-  assert.throws(
-    () => store.saveSentence({ sentence: "a".repeat(241), challengeId: "sarcasm" }),
+  await assert.rejects(
+    store.saveSentence({ sentence: "a".repeat(241), challengeId: "sarcasm" }),
     /240 characters or fewer/,
   );
-  assert.throws(
-    () => store.saveSentence({ sentence: "not\0safe", challengeId: "sarcasm" }),
+  await assert.rejects(
+    store.saveSentence({ sentence: "not\0safe", challengeId: "sarcasm" }),
     /null characters/,
   );
-  assert.throws(
-    () => store.saveSentence({ sentence: "A valid sentence", challengeId: "unknown" }),
+  await assert.rejects(
+    store.saveSentence({ sentence: "A valid sentence", challengeId: "unknown" }),
     /challengeId/,
   );
-  assert.throws(
-    () => store.saveSentence({ sentence: 42, challengeId: "mixed" }),
+  await assert.rejects(
+    store.saveSentence({ sentence: 42, challengeId: "mixed" }),
     /sentence must be a string/,
   );
-  assert.equal(store.count(), 0);
+  assert.equal(await store.count(), 0);
 });
 
-test("all known challenge IDs are accepted", (t) => {
-  const store = createSentenceStore(":memory:");
-  t.after(() => store.close());
+test("all known challenge IDs are accepted", async (t) => {
+  const { store } = await createTestStore(t);
 
   for (const challengeId of ["sarcasm", "clear-vibe", "mixed"]) {
-    store.saveSentence({ sentence: `Submission for ${challengeId}`, challengeId });
+    await store.saveSentence({ sentence: `Submission for ${challengeId}`, challengeId });
   }
 
-  assert.equal(store.count(), 3);
+  assert.equal(await store.count(), 3);
 });
 
-test("sentence values are bound as data instead of interpreted as SQL", (t) => {
-  const store = createSentenceStore(":memory:");
-  t.after(() => store.close());
+test("sentence values are bound as data instead of interpreted as SQL", async (t) => {
+  const { store } = await createTestStore(t);
   const injectionText = "Nice'); DROP TABLE sentence_submissions; --";
 
-  const saved = store.saveSentence({ sentence: injectionText, challengeId: "clear-vibe" });
-  const second = store.saveSentence({ sentence: "The table still works.", challengeId: "mixed" });
+  const saved = await store.saveSentence({ sentence: injectionText, challengeId: "clear-vibe" });
+  const second = await store.saveSentence({ sentence: "The table still works.", challengeId: "mixed" });
 
-  assert.equal(store.getById(saved.id).sentence, injectionText);
+  assert.equal((await store.getById(saved.id)).sentence, injectionText);
   assert.equal(second.id, 2);
-  assert.equal(store.count(), 2);
+  assert.equal(await store.count(), 2);
+});
+
+test("database URL configuration supports Render and Clever Cloud names", () => {
+  assert.equal(
+    databaseUrlFromEnvironment({ DATABASE_URL: "postgresql://render-value" }),
+    "postgresql://render-value",
+  );
+  assert.equal(
+    databaseUrlFromEnvironment({ POSTGRESQL_ADDON_URI: "postgresql://clever-value" }),
+    "postgresql://clever-value",
+  );
+  assert.equal(
+    databaseUrlFromEnvironment({
+      DATABASE_URL: " ",
+      POSTGRESQL_ADDON_URI: "postgresql://clever-fallback",
+    }),
+    "postgresql://clever-fallback",
+  );
+  assert.throws(() => databaseUrlFromEnvironment({}), /DATABASE_URL/);
+});
+
+test("store methods reject calls after the connection pool closes", async () => {
+  const store = await createSentenceStore({ pool: createPool(createMemoryDatabase()) });
+  await store.close();
+  await store.close();
+
+  await assert.rejects(store.count(), /closed/);
+  await assert.rejects(
+    store.saveSentence({ sentence: "Too late", challengeId: "mixed" }),
+    /closed/,
+  );
 });
