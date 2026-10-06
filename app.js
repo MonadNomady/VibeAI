@@ -519,9 +519,7 @@ function challengeFeedback(label, score) {
   const challenge = challenges[state.challengeIndex];
   const normalizedLabel = label.toLowerCase();
   if (challenge.id === "sarcasm") {
-    if (normalizedLabel.includes("sarcas")) return "The model spotted the hidden sarcasm behind the positive words.";
-    if (score > 0.08) return "You fooled the model: it followed the positive words and missed the hidden negative vibe.";
-    return "The model sensed that the message was not as positive as its words first appeared.";
+    return "This model only follows visible word and emoji weights. It cannot know whether you meant the message sarcastically.";
   }
   if (challenge.id === "mixed") {
     if (normalizedLabel.includes("mixed") || Math.abs(score) < 0.18) return "The model noticed competing emotional clues—challenge complete.";
@@ -531,17 +529,13 @@ function challengeFeedback(label, score) {
   return `The model found a clear ${expected} signal in your message.`;
 }
 
-function fallbackEmotions(score, label) {
+function fallbackEmotions(score) {
   const positive = Math.max(0, score);
   const negative = Math.max(0, -score);
-  const sarcasm = label.toLowerCase().includes("sarcas") ? 0.85 : 0.08;
   return {
-    joy: clamp(0.2 + positive * 0.72, 0, 1),
-    trust: clamp(0.15 + positive * 0.52, 0, 1),
-    sadness: clamp(0.12 + negative * 0.58, 0, 1),
-    anger: clamp(0.08 + negative * 0.65, 0, 1),
-    surprise: 0.18,
-    sarcasm,
+    positive: clamp(positive, 0, 1),
+    negative: clamp(negative, 0, 1),
+    neutral: clamp(1 - Math.abs(score), 0, 1),
   };
 }
 
@@ -556,7 +550,7 @@ function renderResults() {
   const call = userCall();
   const emotions = analysis.emotions && Object.keys(analysis.emotions).length
     ? analysis.emotions
-    : fallbackEmotions(score, label);
+    : fallbackEmotions(score);
   const emotionColors = ["#e4b73c", "#f05e58", "#6b9fd3", "#9a7bc4", "#61c976", "#e781a0", "#d3794a"];
   const nonZeroTokens = tokens.filter((token) => Math.abs(tokenWeight(token)) > 0.005);
   const summary = analysis.summary || `The model combined ${nonZeroTokens.length} emotional clue${nonZeroTokens.length === 1 ? "" : "s"} to place this message on the sentiment scale.`;

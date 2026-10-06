@@ -102,58 +102,32 @@ test('gratitude and common positive slang are recognized', () => {
   }
 });
 
-test('positive wording contradicted by an eye-roll emoji is labeled sarcastic', () => {
+test('positive wording and a negative emoji are combined without inferring sarcasm', () => {
   const result = analyzeSentiment('Great job 🙄');
   const great = result.tokens.find((token) => token.normalized === 'great');
   const eyeRoll = result.tokens.find((token) => token.text === '🙄');
 
-  assert.equal(result.label, 'sarcastic');
-  assert.equal(result.literalLabel, 'positive');
-  assert(result.score > 0, 'the signed literal score should be preserved');
+  assert(['positive', 'negative', 'neutral'].includes(result.label));
   assert(great.weight > 0);
   assert(eyeRoll.weight < 0);
-  assert.equal(result.sarcasm.type, 'emoji-contradiction');
-  assert.equal(result.sarcasm.detected, true);
-  assert(great.sarcasmCue && eyeRoll.sarcasmCue);
-  assert.match(result.summary, /sarcastic.*conflicts/i);
+  assert.equal('sarcasm' in result, false);
+  assert.equal('sarcasmCue' in great, false);
+  assert.doesNotMatch(result.summary, /sarcas/i);
 });
 
-test('clear sarcasm phrases are explained even when their literal score is neutral', () => {
+test('sarcastic phrases receive only a literal sentiment reading', () => {
   const disbelief = analyzeSentiment('Yeah, right!');
   const sarcasticThanks = analyzeSentiment('Thanks so much for the terrible service.');
+  const literalPraise = analyzeSentiment('Sure, I totally love doing homework all weekend.');
 
-  assert.equal(disbelief.label, 'sarcastic');
-  assert.equal(disbelief.literalLabel, 'neutral');
+  assert.equal(disbelief.label, 'neutral');
   assert.equal(disbelief.score, 0);
-  assert.equal(disbelief.sarcasm.type, 'disbelief-phrase');
-  assert(disbelief.confidence >= 0.8);
-  assert.match(disbelief.summary, /“yeah right”/i);
-
-  assert.equal(sarcasticThanks.label, 'sarcastic');
-  assert.equal(sarcasticThanks.sarcasm.type, 'sarcastic-gratitude');
   assert(sarcasticThanks.tokens.find((token) => token.normalized === 'thanks').weight > 0);
   assert(sarcasticThanks.tokens.find((token) => token.normalized === 'terrible').weight < 0);
-  assert.match(sarcasticThanks.summary, /negative outcome/i);
-});
-
-test('the glyph-safe starter still exposes sarcastic gratitude', () => {
-  const result = analyzeSentiment('Oh wow, thanks SO much for making me wait an hour :/');
-
-  assert.equal(result.label, 'sarcastic');
-  assert.equal(result.sarcasm.type, 'sarcastic-gratitude');
-  assert(result.tokens.find((token) => token.text === ':/').weight < 0);
-});
-
-test('ordinary mixed contrast is not mislabeled as sarcasm', () => {
-  const mixed = analyzeSentiment('The start was good, but the ending was bad.');
-  const sincereThanks = analyzeSentiment('Thanks for the wonderful help.');
-  const direction = analyzeSentiment('Yeah, right there by the door.');
-
-  assert.notEqual(mixed.label, 'sarcastic');
-  assert.equal(mixed.sarcasm.detected, false);
-  assert.equal(sincereThanks.label, 'positive');
-  assert.equal(sincereThanks.sarcasm.detected, false);
-  assert.notEqual(direction.label, 'sarcastic');
+  assert.equal(literalPraise.label, 'positive');
+  assert(literalPraise.tokens.find((token) => token.normalized === 'love').weight > 0);
+  assert.equal('sarcasm' in disbelief, false);
+  assert.equal('literalLabel' in disbelief, false);
 });
 
 test('balanced opposing cues are reported as mixed or neutral', () => {

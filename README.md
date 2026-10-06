@@ -22,4 +22,4 @@ To store the database elsewhere, set `VIBECHECK_DB_PATH` before starting the ser
 npm test
 ```
 
-The sentiment engine is intentionally transparent and deterministic so students can inspect how every word affects the result. It is a classroom prototype, not a production language model.
+The sentiment engine is intentionally transparent and deterministic so students can inspect how every word affects the result. It deliberately does not detect sarcasm: the sarcasm challenge demonstrates how a literal sentiment model can miss a writer's intended meaning. It is a classroom prototype, not a production language model.

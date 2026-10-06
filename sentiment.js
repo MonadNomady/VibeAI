@@ -287,13 +287,6 @@ const DOWNTONERS = new Map([
 ]);
 
 const CONTRAST_WORDS = new Set(['although', 'but', 'however', 'though', 'yet', 'nevertheless']);
-const SARCASM_EMOJIS = new Set(['🙄', '😒']);
-const GRATITUDE_WORDS = new Set(['thank', 'thanks']);
-const SARCASM_SITUATION_WORDS = new Set([
-  'broke', 'broken', 'breaking', 'delayed', 'forgot', 'forgetting', 'forgotten',
-  'ignored', 'ignoring', 'late', 'mess', 'nothing', 'problem', 'ruin', 'ruined',
-  'ruining', 'terrible', 'wait', 'waiting', 'worst',
-]);
 const CLAUSE_BOUNDARY = /^(?:[.!?]+|[;:])$/u;
 const WORD_TEST = /[\p{L}\p{M}\p{N}]/u;
 const EMOJI_TEST = /(?:\p{Extended_Pictographic}|\p{Regional_Indicator}|[#*0-9]\uFE0F?\u20E3)/u;
@@ -429,7 +422,6 @@ function emptyAnalyzedToken(token) {
     role: token.isPunctuation ? 'punctuation' : 'context',
     reason: token.isPunctuation ? 'Punctuation with no direct sentiment weight.' : 'No direct sentiment signal detected.',
     appliedModifiers: [],
-    sarcasmCue: false,
   };
 }
 
@@ -511,93 +503,6 @@ function buildSummary(label, tokens, positiveMass, negativeMass) {
   const opposite = label === 'positive' ? negativeMass : positiveMass;
   const nuance = opposite > 0 ? ', despite some mixed language' : '';
   return `The sentence reads as ${label}${nuance}; the strongest cue is “${strongest.text}” (${strongest.weight > 0 ? '+' : ''}${strongest.weight.toFixed(2)}).`;
-}
-
-function noSarcasmDetected() {
-  return {
-    detected: false,
-    type: null,
-    confidence: 0,
-    reason: 'No clear contradiction or sarcasm phrase was detected.',
-    cueIndices: [],
-  };
-}
-
-function detectSarcasm(tokens) {
-  const wordIndices = tokens
-    .map((token, index) => (token.isWord ? index : -1))
-    .filter((index) => index >= 0);
-
-  // "Yeah right" is treated as sarcasm only when it is a short utterance,
-  // is followed by punctuation, or comments on an explicit sentiment cue.
-  // This avoids flagging a direction such as "yeah, right there".
-  for (let position = 0; position < wordIndices.length - 1; position += 1) {
-    const yeahIndex = wordIndices[position];
-    const rightIndex = wordIndices[position + 1];
-    if (tokens[yeahIndex].normalized !== 'yeah' || tokens[rightIndex].normalized !== 'right') continue;
-
-    const followingToken = tokens[rightIndex + 1];
-    const hasClosingPunctuation = Boolean(followingToken && /^[,.!?;:]+$/u.test(followingToken.text));
-    const hasLaterSentiment = tokens.slice(rightIndex + 1).some((token) => Math.abs(token.weight) > 0.1);
-    if (wordIndices.length <= 3 || hasClosingPunctuation || hasLaterSentiment) {
-      return {
-        detected: true,
-        type: 'disbelief-phrase',
-        confidence: 0.84,
-        reason: '“yeah right” commonly signals disbelief rather than literal agreement',
-        cueIndices: [yeahIndex, rightIndex],
-      };
-    }
-  }
-
-  // Gratitude followed by "for" and an explicitly negative outcome is a
-  // narrow structural contradiction. Plain gratitude remains positive.
-  const gratitudeIndex = tokens.findIndex(
-    (token) => GRATITUDE_WORDS.has(token.normalized) && token.weight > 0.1,
-  );
-  if (gratitudeIndex >= 0) {
-    const forIndex = tokens.findIndex(
-      (token, index) => index > gratitudeIndex && token.normalized === 'for',
-    );
-    if (forIndex >= 0) {
-      const situationIndex = tokens.findIndex((token, index) => (
-        index > forIndex
-        && (token.weight < -0.1 || SARCASM_SITUATION_WORDS.has(token.normalized))
-      ));
-      if (situationIndex >= 0) {
-        return {
-          detected: true,
-          type: 'sarcastic-gratitude',
-          confidence: 0.88,
-          reason: 'the gratitude phrase points to a clearly negative outcome',
-          cueIndices: [gratitudeIndex, forIndex, situationIndex],
-        };
-      }
-    }
-  }
-
-  // Eye-roll and unamused emoji can contradict literal praise. Requiring a
-  // positively weighted word keeps a lone negative emoji from being labeled
-  // sarcastic.
-  const positiveIndex = tokens.findIndex((token) => token.isWord && token.weight > 0.12);
-  const emojiIndex = tokens.findIndex((token) => SARCASM_EMOJIS.has(emojiLookupKey(token.text)));
-  if (positiveIndex >= 0 && emojiIndex >= 0) {
-    return {
-      detected: true,
-      type: 'emoji-contradiction',
-      confidence: 0.86,
-      reason: `positive wording conflicts with the ${tokens[emojiIndex].text} reaction`,
-      cueIndices: [positiveIndex, emojiIndex],
-    };
-  }
-
-  return noSarcasmDetected();
-}
-
-function buildSarcasmSummary(sarcasm, score, literalLabel) {
-  const signedScore = `${score > 0 ? '+' : ''}${score.toFixed(2)}`;
-  const literalReading = literalLabel === 'neutral' ? 'are neutral' : `lean ${literalLabel}`;
-  return `The sentence likely reads as sarcastic because ${sarcasm.reason}. The literal token weights ${literalReading} (${signedScore}).`;
 }
 
 /**
@@ -686,7 +591,6 @@ export function analyzeSentiment(sentence = '') {
       role: 'sentiment',
       reason,
       appliedModifiers,
-      sarcasmCue: false,
     };
   });
 
@@ -696,16 +600,7 @@ export function analyzeSentiment(sentence = '') {
   const totalWeight = sentimentTokens.reduce((sum, token) => sum + token.weight, 0);
   const cueCount = sentimentTokens.length;
   const score = cueCount === 0 ? 0 : round(clamp(totalWeight / Math.sqrt(cueCount)));
-  const literalLabel = score > 0.12 ? 'positive' : score < -0.12 ? 'negative' : 'neutral';
-  const sarcasm = detectSarcasm(analyzedTokens);
-  const label = sarcasm.detected ? 'sarcastic' : literalLabel;
-
-  if (sarcasm.detected) {
-    for (const index of sarcasm.cueIndices) {
-      analyzedTokens[index].sarcasmCue = true;
-      analyzedTokens[index].reason += ` Sarcasm cue: ${sarcasm.reason}.`;
-    }
-  }
+  const label = score > 0.12 ? 'positive' : score < -0.12 ? 'negative' : 'neutral';
 
   const positiveMass = sentimentTokens.reduce((sum, token) => sum + Math.max(0, token.weight), 0);
   const negativeMass = sentimentTokens.reduce((sum, token) => sum + Math.abs(Math.min(0, token.weight)), 0);
@@ -717,22 +612,13 @@ export function analyzeSentiment(sentence = '') {
 
   if (cueCount === 0) {
     confidence = 0.35;
-  } else if (literalLabel === 'neutral') {
+  } else if (label === 'neutral') {
     confidence = clamp(0.58 + (1 - agreement) * 0.22 + density * 0.08, 0, 0.92);
   } else {
     confidence = clamp(0.5 + Math.abs(score) * 0.3 + agreement * 0.15 + density * 0.05, 0, 0.99);
   }
 
-  if (sarcasm.detected) confidence = sarcasm.confidence;
-
   const emotions = emotionBreakdown(analyzedTokens, positiveMass, negativeMass);
-  const publicSarcasm = {
-    detected: sarcasm.detected,
-    type: sarcasm.type,
-    confidence: sarcasm.confidence,
-    reason: sarcasm.reason,
-    cueTokenIds: sarcasm.cueIndices.map((index) => analyzedTokens[index].id),
-  };
 
   return {
     sentence: source,
@@ -741,13 +627,9 @@ export function analyzeSentiment(sentence = '') {
     score,
     compound: score,
     label,
-    literalLabel,
     sentiment: label,
     confidence: round(confidence),
-    summary: sarcasm.detected
-      ? buildSarcasmSummary(sarcasm, score, literalLabel)
-      : buildSummary(label, analyzedTokens, positiveMass, negativeMass),
-    sarcasm: publicSarcasm,
+    summary: buildSummary(label, analyzedTokens, positiveMass, negativeMass),
     emotions,
     breakdown: emotions,
   };
