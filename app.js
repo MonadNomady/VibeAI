@@ -1,8 +1,24 @@
 import { analyzeSentiment, tokenizeSentence } from "./sentiment.js";
+import {
+  EMOTION_LABELS,
+  buildRadarGeometry,
+  classifyEmotions,
+  getDominantEmotion,
+} from "./emotion-model.js";
 
 const app = document.querySelector("#app");
 const toast = document.querySelector("#toast");
 const brand = document.querySelector(".brand");
+
+const EMOTION_COLORS = {
+  anger: "#e65c54",
+  disgust: "#6c9a48",
+  fear: "#8b6db1",
+  joy: "#e3b333",
+  neutral: "#829099",
+  sadness: "#568cc3",
+  surprise: "#d579b0",
+};
 
 const challenges = [
   {
@@ -43,6 +59,14 @@ const challenges = [
   },
 ];
 
+const initialEmotionResult = () => ({
+  status: "idle",
+  sentence: "",
+  scores: null,
+  error: "",
+  progress: null,
+});
+
 const initialState = () => ({
   screen: "input",
   challengeIndex: 0,
@@ -52,10 +76,19 @@ const initialState = () => ({
   userRatings: {},
   userConfidence: 70,
   analysis: null,
+  emotionResult: initialEmotionResult(),
 });
 
 let state = initialState();
+let participantSession = {
+  status: "checking",
+  participant: null,
+  draftName: "",
+  message: "",
+};
 let toastTimer;
+let emotionRunId = 0;
+let emotionAbortController = null;
 
 const escapeHtml = (value = "") =>
   String(value)
@@ -76,6 +109,74 @@ function showToast(message) {
   toastTimer = window.setTimeout(() => toast.classList.remove("is-visible"), 2300);
 }
 
+function cancelEmotionAnalysis() {
+  emotionRunId += 1;
+  emotionAbortController?.abort();
+  emotionAbortController = null;
+}
+
+function resetEmotionAnalysis() {
+  cancelEmotionAnalysis();
+  state.emotionResult = initialEmotionResult();
+}
+
+async function apiError(response, fallbackMessage) {
+  let message = fallbackMessage;
+  try {
+    const body = await response.json();
+    if (body?.error) message = body.error;
+  } catch {
+    // Keep the safe fallback when the server did not return JSON.
+  }
+  const error = new Error(message);
+  error.status = response.status;
+  return error;
+}
+
+async function loadParticipantSession() {
+  try {
+    const response = await fetch("/api/session", {
+      headers: { Accept: "application/json" },
+    });
+    if (!response.ok) throw await apiError(response, "The classroom session could not be checked.");
+    const body = await response.json();
+    if (body?.participant?.displayName) {
+      participantSession = {
+        status: "ready",
+        participant: body.participant,
+        draftName: "",
+        message: "",
+      };
+    } else {
+      participantSession = {
+        status: "required",
+        participant: null,
+        draftName: "",
+        message: "",
+      };
+    }
+  } catch {
+    participantSession = {
+      status: "required",
+      participant: null,
+      draftName: "",
+      message: "We couldn’t check this browser’s classroom name. Enter it below to try again.",
+    };
+  }
+  render();
+  focusScreenHeading();
+}
+
+async function createParticipant(displayName) {
+  const response = await fetch("/api/participants", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ displayName }),
+  });
+  if (!response.ok) throw await apiError(response, "The classroom name could not be saved.");
+  return response.json();
+}
+
 async function saveSentenceInput(sentence, challengeId) {
   const response = await fetch("/api/sentences", {
     method: "POST",
@@ -84,14 +185,7 @@ async function saveSentenceInput(sentence, challengeId) {
   });
 
   if (!response.ok) {
-    let message = "The sentence could not be saved.";
-    try {
-      const body = await response.json();
-      if (body?.error) message = body.error;
-    } catch {
-      // Keep the safe fallback when the server did not return JSON.
-    }
-    throw new Error(message);
+    throw await apiError(response, "The sentence could not be saved.");
   }
 
   return response.json();
@@ -102,6 +196,14 @@ function updateProgress() {
   const currentIndex = order.indexOf(state.screen);
   const progressNav = document.querySelector(".site-header nav");
 
+  if (participantSession.status !== "ready") {
+    progressNav.hidden = true;
+    progressNav.removeAttribute("data-current-step");
+    progressNav.setAttribute("aria-label", "Activity steps begin after choosing a classroom name");
+    return;
+  }
+
+  progressNav.hidden = false;
   progressNav.dataset.currentStep = String(currentIndex + 1);
   progressNav.setAttribute("aria-label", `Activity progress, step ${currentIndex + 1} of ${order.length}`);
 
@@ -126,9 +228,159 @@ function navigate(screen) {
 
 function render() {
   updateProgress();
+  if (participantSession.status !== "ready") {
+    renderParticipantGate();
+    return;
+  }
   if (state.screen === "scale") renderScale();
   else if (state.screen === "results") renderResults();
   else renderInput();
+}
+
+function participantIdentityMarkup() {
+  const name = participantSession.participant?.displayName ?? "";
+  return `
+    <div class="participant-strip" aria-label="Current classroom name">
+      <span>Working as <strong>${escapeHtml(name)}</strong></span>
+      <button class="switch-participant" type="button" data-switch-participant>Not ${escapeHtml(name)}? Switch user</button>
+    </div>`;
+}
+
+function renderParticipantGate() {
+  const isChecking = participantSession.status === "checking";
+  const isSaving = participantSession.status === "saving";
+  const draftName = participantSession.draftName;
+  document.title = "VibeCheck — Choose a classroom name";
+
+  app.innerHTML = `
+    <section class="screen participant-screen" aria-labelledby="participant-title">
+      <div class="participant-welcome">
+        <p class="eyebrow">Before we start</p>
+        <h1 id="participant-title" tabindex="-1">What should we call you?</h1>
+        <p>This is a classroom label, not an account or login.</p>
+      </div>
+
+      <div class="paper-card participant-card">
+        ${isChecking
+          ? `
+            <div class="participant-checking" role="status" aria-live="polite">
+              <span class="model-spinner" aria-hidden="true"></span>
+              <div><strong>Checking this browser…</strong><p>Looking for a classroom name you already chose.</p></div>
+            </div>`
+          : `
+            <form id="participant-form" novalidate ${isSaving ? `aria-busy="true"` : ""}>
+              <label class="field-label" for="participant-name">First name, nickname, or class code</label>
+              <input
+                class="name-input"
+                id="participant-name"
+                name="displayName"
+                type="text"
+                value="${escapeHtml(draftName)}"
+                autocomplete="off"
+                aria-describedby="participant-help participant-storage participant-error"
+                ${isSaving ? "disabled" : ""}
+                required
+              />
+              <p class="participant-help" id="participant-help">Use 40 characters or fewer for your first name, a nickname, or the class code your teacher gave you. Don’t enter your full name or other private information.</p>
+              <p class="participant-storage" id="participant-storage">We’ll save this classroom name with the sentences you submit so your teacher can tell whose experiment it was.</p>
+              <p class="field-error" id="participant-error" role="alert">${escapeHtml(participantSession.message)}</p>
+              <button class="gradient-button full-width" id="participant-submit" type="submit" ${draftName.trim() && !isSaving ? "" : "disabled"}>
+                ${isSaving ? "Saving your name…" : "Start the activity"}
+              </button>
+            </form>`}
+      </div>
+    </section>`;
+
+  if (isChecking || isSaving) return;
+
+  const form = app.querySelector("#participant-form");
+  const input = app.querySelector("#participant-name");
+  const submit = app.querySelector("#participant-submit");
+  const error = app.querySelector("#participant-error");
+
+  input.addEventListener("input", () => {
+    participantSession.draftName = input.value;
+    participantSession.message = "";
+    error.textContent = "";
+    submit.disabled = !input.value.trim();
+  });
+
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const displayName = input.value.normalize("NFC").trim().replace(/\s+/gu, " ");
+    if (!displayName) {
+      error.textContent = "Enter a first name, nickname, or class code.";
+      input.focus();
+      return;
+    }
+    if ([...displayName].length > 40) {
+      error.textContent = "Keep your classroom name to 40 characters or fewer.";
+      input.focus();
+      return;
+    }
+
+    participantSession.status = "saving";
+    participantSession.draftName = displayName;
+    participantSession.message = "";
+    renderParticipantGate();
+
+    try {
+      const body = await createParticipant(displayName);
+      participantSession = {
+        status: "ready",
+        participant: body.participant,
+        draftName: "",
+        message: "",
+      };
+      state = initialState();
+      render();
+      focusScreenHeading();
+      showToast(`Welcome, ${body.participant.displayName}!`);
+    } catch (saveError) {
+      participantSession.status = "required";
+      participantSession.message = saveError.message;
+      renderParticipantGate();
+      window.requestAnimationFrame(() => app.querySelector("#participant-name")?.focus());
+    }
+  });
+}
+
+async function switchParticipant(button) {
+  const hasWork = Boolean(state.sentence.trim()) || state.screen !== "input";
+  if (
+    hasWork
+    && !window.confirm(
+      "Switch users and clear the work currently on this page? Sentences already submitted will stay saved.",
+    )
+  ) {
+    return;
+  }
+
+  button.disabled = true;
+  const originalLabel = button.textContent;
+  button.textContent = "Switching…";
+
+  try {
+    const response = await fetch("/api/session", { method: "DELETE" });
+    if (!response.ok) throw await apiError(response, "The classroom user could not be switched.");
+
+    const challengeIndex = state.challengeIndex;
+    cancelEmotionAnalysis();
+    state = initialState();
+    state.challengeIndex = challengeIndex;
+    participantSession = {
+      status: "required",
+      participant: null,
+      draftName: "",
+      message: "Enter the classroom name for the next user.",
+    };
+    render();
+    focusScreenHeading();
+  } catch {
+    button.disabled = false;
+    button.textContent = originalLabel;
+    showToast("We couldn’t switch users. Check the server and try again.");
+  }
 }
 
 function renderInput() {
@@ -137,6 +389,7 @@ function renderInput() {
   document.title = "VibeCheck — Input challenge";
   app.innerHTML = `
     <section class="screen" aria-labelledby="input-title">
+      ${participantIdentityMarkup()}
       <div class="hero">
         <p class="eyebrow">Sentiment lab</p>
         <h1 id="input-title" tabindex="-1">How does AI read human emotion?</h1>
@@ -182,7 +435,7 @@ function renderInput() {
             >${escapeHtml(state.sentence)}</textarea>
             <span class="character-count"><span id="character-count">${state.sentence.length}</span>/240</span>
           </div>
-          <p class="storage-note" id="storage-note">Submitted sentences are saved for this activity. Don’t include private information.</p>
+          <p class="storage-note" id="storage-note">This sentence will be saved with the classroom name <strong>${escapeHtml(participantSession.participant.displayName)}</strong>. Don’t include anyone’s full name, address, username, or other private information.</p>
           <p class="field-error" id="input-error" aria-live="polite"></p>
           <p id="challenge-helper" class="starter-label">${escapeHtml(challenge.helper)}</p>
           <ul class="starter-list" aria-label="Sentence starters">
@@ -265,7 +518,7 @@ function renderInput() {
     }
 
     const challengeId = challenge.id;
-    const submissionKey = `${challengeId}\u0000${sentence}`;
+    const submissionKey = `${participantSession.participant.id}\u0000${challengeId}\u0000${sentence}`;
 
     if (state.savedSubmissionKey !== submissionKey) {
       const controls = [...app.querySelectorAll("button, textarea")];
@@ -277,7 +530,22 @@ function renderInput() {
       try {
         await saveSentenceInput(sentence, challengeId);
         state.savedSubmissionKey = submissionKey;
-      } catch {
+      } catch (saveError) {
+        if (saveError.status === 401) {
+          const challengeIndex = state.challengeIndex;
+          cancelEmotionAnalysis();
+          state = initialState();
+          state.challengeIndex = challengeIndex;
+          participantSession = {
+            status: "required",
+            participant: null,
+            draftName: "",
+            message: "Your classroom session ended. Enter your classroom name again.",
+          };
+          render();
+          focusScreenHeading();
+          return;
+        }
         form.removeAttribute("aria-busy");
         controls.forEach((control) => { control.disabled = false; });
         submit.textContent = "Analyze message";
@@ -292,6 +560,7 @@ function renderInput() {
     state.tokens = tokens;
     state.userRatings = Object.fromEntries(tokens.map((token) => [token.id, 0]));
     state.analysis = null;
+    resetEmotionAnalysis();
     navigate("scale");
     showToast("Message saved to the class database.");
   });
@@ -358,6 +627,7 @@ function renderScale(options = {}) {
   document.title = "VibeCheck — Your turn";
   app.innerHTML = `
     <section class="screen" aria-labelledby="scale-title">
+      ${participantIdentityMarkup()}
       <button class="back-button" id="back-to-input" type="button">← Edit my sentence</button>
 
       <div class="stage-heading">
@@ -539,6 +809,205 @@ function fallbackEmotions(score) {
   };
 }
 
+function emotionEntries(scores = {}) {
+  return EMOTION_LABELS.map((label) => ({
+    label,
+    score: clamp(Number(scores[label] ?? 0), 0, 1),
+  }));
+}
+
+function emotionRadarMarkup(scores) {
+  const geometry = buildRadarGeometry(scores, {
+    width: 340,
+    height: 300,
+    centerX: 170,
+    centerY: 145,
+    radius: 96,
+    labelOffset: 24,
+  });
+
+  return `
+    <svg class="emotion-radar" viewBox="${geometry.viewBox}" aria-hidden="true" focusable="false">
+      ${geometry.rings.map((ring) => `<polygon class="radar-grid" points="${ring.points}"></polygon>`).join("")}
+      ${geometry.axes
+        .map(
+          (axis) => `
+            <line class="radar-axis" x1="${geometry.centerX}" y1="${geometry.centerY}" x2="${axis.x}" y2="${axis.y}"></line>
+            <text class="radar-label" x="${axis.labelX}" y="${axis.labelY}" dy="0.35em">${escapeHtml(titleCase(axis.label))}</text>`,
+        )
+        .join("")}
+      <polygon class="radar-score" points="${geometry.polygon}"></polygon>
+      ${geometry.points
+        .map(
+          (point) => `<circle class="radar-dot" cx="${point.x}" cy="${point.y}" r="4" style="--emotion-color: ${EMOTION_COLORS[point.label]}"></circle>`,
+        )
+        .join("")}
+    </svg>`;
+}
+
+function emotionLoadingMarkup(progress = null) {
+  const hasProgress = Number.isFinite(progress);
+  const normalizedProgress = hasProgress ? clamp(Math.round(progress), 0, 100) : null;
+  return `
+    <div class="model-loading" aria-busy="true">
+      <div class="model-loading-head">
+        <span class="model-spinner" aria-hidden="true"></span>
+        <div>
+          <strong>Loading the neural emotion model…</strong>
+          <p id="emotion-model-status" role="status" aria-live="polite" aria-atomic="true" tabindex="-1">The word-weight result above is ready while this optional model loads.</p>
+        </div>
+      </div>
+      <div class="model-progress-row">
+        <progress id="emotion-model-progress" max="100" ${hasProgress ? `value="${normalizedProgress}"` : ""} aria-label="Emotion model download progress">${hasProgress ? normalizedProgress : 0}%</progress>
+        <span class="model-progress-value" id="emotion-model-progress-value">${hasProgress ? `${normalizedProgress}%` : "…"}</span>
+      </div>
+      <p class="model-download-note">First use downloads about 83 MB of model weights. Your browser normally caches them for later visits.</p>
+    </div>`;
+}
+
+function emotionReadyMarkup(scores) {
+  const entries = emotionEntries(scores);
+  const dominant = getDominantEmotion(scores);
+  const dominantLabel = dominant?.label ?? null;
+  const dominantScore = clamp(Number(dominant?.score ?? 0), 0, 1);
+
+  return `
+    <div class="emotion-model-callout" id="emotion-model-status" role="status" aria-live="polite" aria-atomic="true" tabindex="-1">
+      <span>Neural model’s strongest label</span>
+      <strong>${dominantLabel ? `${escapeHtml(titleCase(dominantLabel))} · ${Math.round(dominantScore * 100)}%` : "No clear label"}</strong>
+    </div>
+    <div class="emotion-model-layout">
+      <div>${emotionRadarMarkup(scores)}</div>
+      <div class="emotion-model-bars" role="list" aria-label="Neural emotion model scores">
+        ${entries
+          .map(({ label, score }) => {
+            const percent = Math.round(score * 100);
+            const color = EMOTION_COLORS[label];
+            return `
+              <div class="emotion-score-row" role="listitem" style="--bar-color: ${color}">
+                <span class="emotion-score-label"><span class="emotion-score-dot" style="--emotion-color: ${color}" aria-hidden="true"></span>${escapeHtml(titleCase(label))}</span>
+                <progress max="100" value="${(score * 100).toFixed(2)}" aria-label="${escapeHtml(titleCase(label))} model score, ${percent} percent">${percent}%</progress>
+                <span class="emotion-score-value" aria-hidden="true">${percent}%</span>
+              </div>`;
+          })
+          .join("")}
+      </div>
+    </div>
+    <p class="emotion-model-caution"><strong>Important:</strong> These are the model’s relative scores for seven possible labels—not measurements of what you actually feel. The model can misunderstand context and sarcasm.</p>
+    <p class="emotion-model-credit">Model: <a href="https://huggingface.co/j-hartmann/emotion-english-distilroberta-base" target="_blank" rel="noreferrer">Jochen Hartmann’s Emotion English DistilRoBERTa-base</a>, run in this browser using an <a href="https://huggingface.co/onnx-community/emotion-english-distilroberta-base-ONNX" target="_blank" rel="noreferrer">ONNX Community conversion</a>. The fine-tuned model card does not declare a license.</p>`;
+}
+
+function emotionErrorMarkup() {
+  return `
+    <div class="model-error">
+      <div id="emotion-model-status" role="status" aria-live="polite" aria-atomic="true" tabindex="-1">
+        <strong>The optional emotion model couldn’t load.</strong>
+        <p>Your word-weight result is still complete. A school filter, connection problem, or browser setting may have blocked the model files.</p>
+      </div>
+      <button class="model-retry-button" id="retry-emotion-model" type="button">Try loading it again</button>
+    </div>`;
+}
+
+function emotionModelContentMarkup() {
+  if (state.emotionResult.status === "ready" && state.emotionResult.scores) {
+    return emotionReadyMarkup(state.emotionResult.scores);
+  }
+  if (state.emotionResult.status === "error") return emotionErrorMarkup();
+  return emotionLoadingMarkup(state.emotionResult.progress);
+}
+
+function bindEmotionPanelActions() {
+  app.querySelector("#retry-emotion-model")?.addEventListener("click", () => {
+    void startEmotionAnalysis({ force: true });
+  });
+}
+
+function updateEmotionPanel() {
+  const content = app.querySelector("#emotion-model-content");
+  if (!content) return;
+  content.innerHTML = emotionModelContentMarkup();
+  bindEmotionPanelActions();
+}
+
+function updateEmotionProgress(progress) {
+  const progressElement = app.querySelector("#emotion-model-progress");
+  const valueElement = app.querySelector("#emotion-model-progress-value");
+  if (!progressElement || !valueElement) return;
+  progressElement.value = progress;
+  progressElement.textContent = `${progress}%`;
+  valueElement.textContent = `${progress}%`;
+  if (progress >= 100) {
+    const heading = app.querySelector(".model-loading-head strong");
+    const status = app.querySelector("#emotion-model-status");
+    if (heading) heading.textContent = "Model loaded—reading the sentence…";
+    if (status) status.textContent = "The model is loaded and is now reading the sentence.";
+  }
+}
+
+async function startEmotionAnalysis({ force = false } = {}) {
+  const sentence = state.sentence.trim();
+  if (!sentence) return;
+
+  const current = state.emotionResult;
+  const isSameSentence = current.sentence === sentence;
+  if (!force && isSameSentence && current.status !== "idle") return;
+
+  emotionAbortController?.abort();
+  const controller = new AbortController();
+  emotionAbortController = controller;
+  const runId = ++emotionRunId;
+
+  state.emotionResult = {
+    status: "loading",
+    sentence,
+    scores: null,
+    error: "",
+    progress: null,
+  };
+  updateEmotionPanel();
+  if (force) app.querySelector("#emotion-model-status")?.focus({ preventScroll: true });
+
+  try {
+    const scores = await classifyEmotions(sentence, {
+      signal: controller.signal,
+      onProgress(update) {
+        if (runId !== emotionRunId || state.sentence.trim() !== sentence) return;
+        const numericProgress = Number(update?.progress ?? update);
+        if (!Number.isFinite(numericProgress)) return;
+        const progress = clamp(Math.round(numericProgress), 0, 100);
+        if (progress === state.emotionResult.progress) return;
+        state.emotionResult.progress = progress;
+        updateEmotionProgress(progress);
+      },
+    });
+
+    if (runId !== emotionRunId || state.sentence.trim() !== sentence) return;
+    state.emotionResult = {
+      status: "ready",
+      sentence,
+      scores,
+      error: "",
+      progress: 100,
+    };
+    updateEmotionPanel();
+    if (force) app.querySelector("#emotion-model-status")?.focus({ preventScroll: true });
+  } catch (error) {
+    if (controller.signal.aborted || runId !== emotionRunId || state.sentence.trim() !== sentence) return;
+    console.warn("Optional emotion model failed:", error);
+    state.emotionResult = {
+      status: "error",
+      sentence,
+      scores: null,
+      error: "The optional emotion model could not load.",
+      progress: null,
+    };
+    updateEmotionPanel();
+    if (force) app.querySelector("#emotion-model-status")?.focus({ preventScroll: true });
+  } finally {
+    if (emotionAbortController === controller) emotionAbortController = null;
+  }
+}
+
 function renderResults() {
   const analysis = state.analysis ?? analyzeSentiment(state.sentence);
   state.analysis = analysis;
@@ -558,12 +1027,13 @@ function renderResults() {
 
   app.innerHTML = `
     <section class="screen" aria-labelledby="results-title">
+      ${participantIdentityMarkup()}
       <button class="back-button" id="back-to-scale" type="button">← Revisit my word map</button>
 
       <div class="stage-heading">
         <p class="eyebrow">Inside the model</p>
         <h1 id="results-title" tabindex="-1">Here’s how the AI read it</h1>
-        <p>Compare your instinct with a transparent classroom sentiment model.</p>
+        <p>Compare your instinct with an explainable word-weight model and a neural emotion classifier.</p>
       </div>
 
       <div class="sentence-ribbon result-quote">
@@ -575,11 +1045,11 @@ function renderResults() {
         <article class="paper-card classification-card">
           <div class="classification-top">
             <div>
-              <span class="tiny-label">Final AI classification</span>
+              <span class="tiny-label">Word-weight sentiment classification</span>
               <h2 class="classification-name">${escapeHtml(label)}</h2>
               <p class="classification-summary">${escapeHtml(summary)}</p>
             </div>
-            <span class="confidence-badge">${confidence}% model confidence</span>
+            <span class="confidence-badge">${confidence}% word-model confidence</span>
           </div>
           <div class="sentiment-gauge" aria-label="Sentiment score ${formatSigned(score)} on a scale from negative one to positive one">
             <div class="gauge-track">
@@ -591,18 +1061,18 @@ function renderResults() {
         </article>
 
         <aside class="paper-card comparison-card">
-          <span class="tiny-label">You vs. the model</span>
+          <span class="tiny-label">You vs. the word model</span>
           <h2>${agreement}% word agreement</h2>
           <p>How often your word labels matched the model’s direction.</p>
           <div class="comparison-score" style="--agreement: ${agreement}%"><strong>${agreement}%</strong></div>
           <div class="call-row"><span>Your call</span><span class="call-pill">${escapeHtml(call)}</span></div>
           <div class="call-row"><span>Your confidence</span><span class="call-pill">${state.userConfidence}%</span></div>
-          <div class="call-row"><span>Model’s call</span><span class="call-pill">${escapeHtml(label)}</span></div>
+          <div class="call-row"><span>Word model’s call</span><span class="call-pill">${escapeHtml(label)}</span></div>
         </aside>
       </div>
 
       <article class="paper-card weights-card section-card">
-        <span class="tiny-label"><span class="section-number">1</span>Model pipeline</span>
+        <span class="tiny-label"><span class="section-number">1</span>Transparent model pipeline</span>
         <h2>Individual token weights</h2>
         <p class="weights-intro">Each token starts with a dictionary score. Context—like negation, emphasis, or contrast—can change its final weight.</p>
         <details class="weights-details" ${window.matchMedia("(min-width: 561px)").matches ? "open" : ""}>
@@ -658,6 +1128,20 @@ function renderResults() {
         </div>
       </article>
 
+      <article class="paper-card emotion-model-card section-card" id="emotion-model-card" aria-labelledby="emotion-model-title">
+        <div class="emotion-model-heading">
+          <div>
+            <span class="tiny-label"><span class="section-number">3</span>Neural model comparison</span>
+            <h2 id="emotion-model-title">Seven-emotion guess</h2>
+            <p class="emotion-model-intro">A separate DistilRoBERTa model reads the whole sentence and compares seven emotion labels. Unlike the word model, it does not expose a weight for each word.</p>
+          </div>
+          <span class="model-kind">Optional browser model</span>
+        </div>
+        <div class="emotion-model-content" id="emotion-model-content">
+          ${emotionModelContentMarkup()}
+        </div>
+      </article>
+
       <div class="results-actions">
         <button class="text-button" id="adjust-map" type="button">Adjust my word map</button>
         <button class="gradient-button" id="start-over" type="button">Try another message</button>
@@ -669,16 +1153,31 @@ function renderResults() {
   app.querySelector("#adjust-map").addEventListener("click", () => navigate("scale"));
   app.querySelector("#start-over").addEventListener("click", () => {
     const challengeIndex = state.challengeIndex;
+    cancelEmotionAnalysis();
     state = initialState();
     state.challengeIndex = challengeIndex;
     render();
     focusScreenHeading();
     showToast("Fresh page, fresh vibe.");
   });
+
+  bindEmotionPanelActions();
+  void startEmotionAnalysis();
 }
+
+app.addEventListener("click", (event) => {
+  const switchButton = event.target instanceof Element
+    ? event.target.closest("[data-switch-participant]")
+    : null;
+  if (switchButton) void switchParticipant(switchButton);
+});
 
 brand.addEventListener("click", (event) => {
   event.preventDefault();
+  if (participantSession.status !== "ready") {
+    window.scrollTo({ top: 0, behavior: "smooth" });
+    return;
+  }
   if (state.screen === "input") {
     window.scrollTo({ top: 0, behavior: "smooth" });
     return;
@@ -687,3 +1186,4 @@ brand.addEventListener("click", (event) => {
 });
 
 render();
+void loadParticipantSession();

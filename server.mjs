@@ -1,12 +1,19 @@
+import { createHash, randomBytes } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { stat } from "node:fs/promises";
 import { createServer } from "node:http";
 import { fileURLToPath } from "node:url";
 import { extname, join, resolve } from "node:path";
-import { createSentenceStore, databaseUrlFromEnvironment } from "./storage.mjs";
+import {
+  createSentenceStore,
+  databaseUrlFromEnvironment,
+  normalizeDisplayName,
+} from "./storage.mjs";
 
 const DEFAULT_PORT = 4173;
 const MAX_BODY_BYTES = 4_096;
+const SESSION_COOKIE_NAME = "vibecheck_session";
+const SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 30;
 const modulePath = fileURLToPath(import.meta.url);
 const defaultRoot = fileURLToPath(new URL(".", import.meta.url));
 
@@ -14,6 +21,8 @@ const publicFiles = new Map([
   ["/", "index.html"],
   ["/index.html", "index.html"],
   ["/app.js", "app.js"],
+  ["/emotion-model.js", "emotion-model.js"],
+  ["/emotion-worker.js", "emotion-worker.js"],
   ["/sentiment.js", "sentiment.js"],
   ["/styles.css", "styles.css"],
 ]);
@@ -58,6 +67,79 @@ function writeJson(response, status, body, extraHeaders = {}) {
   response.end(JSON.stringify(body));
 }
 
+function writeNoContent(response, extraHeaders = {}) {
+  response.writeHead(204, {
+    "Cache-Control": "no-store",
+    "X-Content-Type-Options": "nosniff",
+    ...extraHeaders,
+  });
+  response.end();
+}
+
+function cookieValue(request, name) {
+  const header = request.headers.cookie;
+  if (typeof header !== "string") return null;
+
+  for (const part of header.split(";")) {
+    const separator = part.indexOf("=");
+    if (separator < 0) continue;
+    const key = part.slice(0, separator).trim();
+    if (key !== name) continue;
+    try {
+      return decodeURIComponent(part.slice(separator + 1).trim());
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+function requestUsesHttps(request) {
+  if (request.socket.encrypted === true) return true;
+  const forwardedProtocol = String(request.headers["x-forwarded-proto"] ?? "")
+    .split(",", 1)[0]
+    .trim()
+    .toLowerCase();
+  return forwardedProtocol === "https";
+}
+
+function sessionCookie(request, token, { expiresAt, clear = false } = {}) {
+  const parts = [
+    `${SESSION_COOKIE_NAME}=${clear ? "" : encodeURIComponent(token)}`,
+    "Path=/",
+    "HttpOnly",
+    "SameSite=Lax",
+  ];
+
+  if (clear) {
+    parts.push("Max-Age=0", "Expires=Thu, 01 Jan 1970 00:00:00 GMT");
+  } else {
+    parts.push(`Max-Age=${SESSION_MAX_AGE_SECONDS}`, `Expires=${expiresAt.toUTCString()}`);
+  }
+  if (requestUsesHttps(request)) parts.push("Secure");
+  return parts.join("; ");
+}
+
+function hashSessionToken(token) {
+  return createHash("sha256").update(token).digest("hex");
+}
+
+function publicParticipant(participant) {
+  if (!participant) return null;
+  return { id: participant.id, displayName: participant.displayName };
+}
+
+async function participantSession(request, store) {
+  const token = cookieValue(request, SESSION_COOKIE_NAME);
+  if (!token) return { participant: null, shouldClear: false };
+  if (!/^[A-Za-z0-9_-]{43}$/.test(token)) {
+    return { participant: null, shouldClear: true };
+  }
+
+  const participant = await store.getParticipantBySessionHash(hashSessionToken(token));
+  return { participant, shouldClear: participant === null };
+}
+
 async function readJsonBody(request) {
   const contentType = request.headers["content-type"]?.split(";", 1)[0].trim().toLowerCase() ?? "";
   if (contentType !== "application/json") {
@@ -93,7 +175,31 @@ async function readJsonBody(request) {
   return body;
 }
 
-async function handleSentenceApi(request, response, store) {
+async function handleSessionApi(request, response, store) {
+  if (request.method === "DELETE") {
+    const token = cookieValue(request, SESSION_COOKIE_NAME);
+    if (token && /^[A-Za-z0-9_-]{43}$/.test(token)) {
+      await store.revokeParticipantSession(hashSessionToken(token));
+    }
+    writeNoContent(response, {
+      "Set-Cookie": sessionCookie(request, "", { clear: true }),
+    });
+    return;
+  }
+
+  if (request.method !== "GET") {
+    writeJson(response, 405, { error: "Method not allowed." }, { Allow: "GET, DELETE" });
+    return;
+  }
+
+  const session = await participantSession(request, store);
+  const headers = session.shouldClear
+    ? { "Set-Cookie": sessionCookie(request, "", { clear: true }) }
+    : {};
+  writeJson(response, 200, { participant: publicParticipant(session.participant) }, headers);
+}
+
+async function handleParticipantApi(request, response, store) {
   if (request.method !== "POST") {
     writeJson(response, 405, { error: "Method not allowed." }, { Allow: "POST" });
     return;
@@ -101,9 +207,72 @@ async function handleSentenceApi(request, response, store) {
 
   try {
     const body = await readJsonBody(request);
+    const displayName = normalizeDisplayName(body.displayName);
+    const currentSession = await participantSession(request, store);
+
+    if (currentSession.participant) {
+      if (currentSession.participant.displayName === displayName) {
+        writeJson(response, 200, {
+          participant: publicParticipant(currentSession.participant),
+        });
+        return;
+      }
+    }
+
+    const token = randomBytes(32).toString("base64url");
+    const expiresAt = new Date(Date.now() + SESSION_MAX_AGE_SECONDS * 1_000);
+    const participant = await store.createParticipant({
+      displayName,
+      sessionTokenHash: hashSessionToken(token),
+      sessionExpiresAt: expiresAt,
+    });
+
+    writeJson(
+      response,
+      201,
+      { participant: publicParticipant(participant) },
+      { "Set-Cookie": sessionCookie(request, token, { expiresAt }) },
+    );
+  } catch (error) {
+    if (error instanceof RequestError) {
+      writeJson(response, error.status, { error: error.message });
+      return;
+    }
+    if (error instanceof TypeError || error instanceof RangeError) {
+      writeJson(response, 400, { error: error.message });
+      return;
+    }
+    console.error("Failed to create participant:", error);
+    writeJson(response, 500, { error: "The classroom name could not be saved." });
+  }
+}
+
+async function handleSentenceApi(request, response, store) {
+  if (request.method !== "POST") {
+    writeJson(response, 405, { error: "Method not allowed." }, { Allow: "POST" });
+    return;
+  }
+
+  try {
+    const session = await participantSession(request, store);
+    if (!session.participant) {
+      const headers = session.shouldClear
+        ? { "Set-Cookie": sessionCookie(request, "", { clear: true }) }
+        : {};
+      writeJson(
+        response,
+        401,
+        { error: "Enter your classroom name before submitting a sentence." },
+        headers,
+      );
+      return;
+    }
+
+    const body = await readJsonBody(request);
     const saved = await store.saveSentence({
       sentence: body.sentence,
       challengeId: body.challengeId,
+      participantId: session.participant.id,
     });
     writeJson(response, 201, { id: saved.id, createdAt: saved.createdAt });
   } catch (error) {
@@ -150,8 +319,17 @@ async function servePublicFile(request, response, pathname, rootDirectory) {
 }
 
 export function createVibeCheckServer({ rootDirectory = defaultRoot, store } = {}) {
-  if (!store || typeof store.saveSentence !== "function" || typeof store.close !== "function") {
-    throw new TypeError("store must provide saveSentence() and close() methods");
+  if (
+    !store
+    || typeof store.createParticipant !== "function"
+    || typeof store.getParticipantBySessionHash !== "function"
+    || typeof store.revokeParticipantSession !== "function"
+    || typeof store.saveSentence !== "function"
+    || typeof store.close !== "function"
+  ) {
+    throw new TypeError(
+      "store must provide participant, sentence, and close methods",
+    );
   }
 
   const resolvedRoot = resolve(rootDirectory);
@@ -163,6 +341,16 @@ export function createVibeCheckServer({ rootDirectory = defaultRoot, store } = {
         pathname = new URL(request.url, "http://localhost").pathname;
       } catch {
         throw new RequestError(400, "Invalid request URL.");
+      }
+
+      if (pathname === "/api/session") {
+        await handleSessionApi(request, response, store);
+        return;
+      }
+
+      if (pathname === "/api/participants") {
+        await handleParticipantApi(request, response, store);
+        return;
       }
 
       if (pathname === "/api/sentences") {
