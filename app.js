@@ -77,6 +77,9 @@ const initialState = () => ({
   userConfidence: 70,
   analysis: null,
   emotionResult: initialEmotionResult(),
+  selectedTokenIndex: 0,
+  tweakedSentence: "",
+  tweakedAnalysis: null,
 });
 
 let state = initialState();
@@ -91,12 +94,12 @@ let emotionRunId = 0;
 let emotionAbortController = null;
 
 const escapeHtml = (value = "") =>
-  String(value)
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#039;");
+    String(value)
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#039;");
 
 const clamp = (value, minimum, maximum) => Math.min(maximum, Math.max(minimum, value));
 const titleCase = (value = "") => value.charAt(0).toUpperCase() + value.slice(1);
@@ -192,7 +195,7 @@ async function saveSentenceInput(sentence, challengeId) {
 }
 
 function updateProgress() {
-  const order = ["input", "scale", "results"];
+  const order = ["input", "scale", "results", "tweak"];
   const currentIndex = order.indexOf(state.screen);
   const progressNav = document.querySelector(".site-header nav");
 
@@ -234,6 +237,7 @@ function render() {
   }
   if (state.screen === "scale") renderScale();
   else if (state.screen === "results") renderResults();
+  else if (state.screen === "tweak") renderTweak();
   else renderInput();
 }
 
@@ -262,12 +266,12 @@ function renderParticipantGate() {
 
       <div class="paper-card participant-card">
         ${isChecking
-          ? `
+      ? `
             <div class="participant-checking" role="status" aria-live="polite">
               <span class="model-spinner" aria-hidden="true"></span>
               <div><strong>Checking this browser…</strong><p>Looking for a classroom name you already chose.</p></div>
             </div>`
-          : `
+      : `
             <form id="participant-form" novalidate ${isSaving ? `aria-busy="true"` : ""}>
               <label class="field-label" for="participant-name">First name, nickname, or class code</label>
               <input
@@ -348,10 +352,10 @@ function renderParticipantGate() {
 async function switchParticipant(button) {
   const hasWork = Boolean(state.sentence.trim()) || state.screen !== "input";
   if (
-    hasWork
-    && !window.confirm(
-      "Switch users and clear the work currently on this page? Sentences already submitted will stay saved.",
-    )
+      hasWork
+      && !window.confirm(
+          "Switch users and clear the work currently on this page? Sentences already submitted will stay saved.",
+      )
   ) {
     return;
   }
@@ -408,8 +412,8 @@ function renderInput() {
 
       <div class="challenge-dots" role="group" aria-label="Challenge choices">
         ${challenges
-          .map(
-            (_, index) => `
+      .map(
+          (_, index) => `
               <button
                 class="challenge-dot ${index === state.challengeIndex ? "is-active" : ""}"
                 type="button"
@@ -417,8 +421,8 @@ function renderInput() {
                 aria-label="Show challenge ${index + 1}"
                 aria-pressed="${index === state.challengeIndex}"
               ></button>`,
-          )
-          .join("")}
+      )
+      .join("")}
       </div>
 
       <form id="message-form" novalidate>
@@ -440,11 +444,11 @@ function renderInput() {
           <p id="challenge-helper" class="starter-label">${escapeHtml(challenge.helper)}</p>
           <ul class="starter-list" aria-label="Sentence starters">
             ${challenge.examples
-              .map(
-                (example) => `
+      .map(
+          (example) => `
                   <li><button class="starter-chip" type="button" data-example="${escapeHtml(example)}">${escapeHtml(example)}</button></li>`,
-              )
-              .join("")}
+      )
+      .join("")}
           </ul>
         </div>
         <button class="gradient-button full-width" id="analyze-button" type="submit" ${isReady ? "" : "disabled"}>
@@ -668,10 +672,10 @@ function renderScale(options = {}) {
           <span class="tiny-label">Your sentiment map</span>
           <div class="mapping-preview">
             ${state.tokens
-              .map(
-                (token) => `<span class="mini-token" data-rating="${state.userRatings[token.id] ?? 0}">${escapeHtml(token.text)}</span>`,
-              )
-              .join("")}
+      .map(
+          (token) => `<span class="mini-token" data-rating="${state.userRatings[token.id] ?? 0}">${escapeHtml(token.text)}</span>`,
+      )
+      .join("")}
           </div>
         </div>
       </div>
@@ -730,7 +734,7 @@ function renderScale(options = {}) {
   if (options.focusTokenId) {
     window.requestAnimationFrame(() => {
       const target = [...app.querySelectorAll(".token-chip")].find(
-        (chip) => chip.dataset.tokenId === options.focusTokenId,
+          (chip) => chip.dataset.tokenId === options.focusTokenId,
       );
       target?.focus({ preventScroll: true });
     });
@@ -764,13 +768,13 @@ function userCall() {
 
 function agreementScore(analysisTokens) {
   const comparableTokens = analysisTokens
-    .map((token, index) => ({ token, index }))
-    .filter(({ token, index }) => {
-      const inputToken = state.tokens[index];
-      const userRating = Number(state.userRatings[inputToken?.id] ?? 0);
-      const modelRating = signOf(tokenWeight(token));
-      return userRating !== 0 || modelRating !== 0;
-    });
+      .map((token, index) => ({ token, index }))
+      .filter(({ token, index }) => {
+        const inputToken = state.tokens[index];
+        const userRating = Number(state.userRatings[inputToken?.id] ?? 0);
+        const modelRating = signOf(tokenWeight(token));
+        return userRating !== 0 || modelRating !== 0;
+      });
   if (!comparableTokens.length) return 100;
   const matches = comparableTokens.filter(({ token, index }) => {
     const inputToken = state.tokens[index];
@@ -830,18 +834,18 @@ function emotionRadarMarkup(scores) {
     <svg class="emotion-radar" viewBox="${geometry.viewBox}" aria-hidden="true" focusable="false">
       ${geometry.rings.map((ring) => `<polygon class="radar-grid" points="${ring.points}"></polygon>`).join("")}
       ${geometry.axes
-        .map(
+      .map(
           (axis) => `
             <line class="radar-axis" x1="${geometry.centerX}" y1="${geometry.centerY}" x2="${axis.x}" y2="${axis.y}"></line>
             <text class="radar-label" x="${axis.labelX}" y="${axis.labelY}" dy="0.35em">${escapeHtml(titleCase(axis.label))}</text>`,
-        )
-        .join("")}
+      )
+      .join("")}
       <polygon class="radar-score" points="${geometry.polygon}"></polygon>
       ${geometry.points
-        .map(
+      .map(
           (point) => `<circle class="radar-dot" cx="${point.x}" cy="${point.y}" r="4" style="--emotion-color: ${EMOTION_COLORS[point.label]}"></circle>`,
-        )
-        .join("")}
+      )
+      .join("")}
     </svg>`;
 }
 
@@ -874,23 +878,23 @@ function emotionReadyMarkup(scores) {
   return `
     <div class="emotion-model-callout" id="emotion-model-status" role="status" aria-live="polite" aria-atomic="true" tabindex="-1">
       <span>Neural model’s strongest label</span>
-      <strong>${dominantLabel ? `${escapeHtml(titleCase(dominantLabel))} · ${Math.round(dominantScore * 100)}%` : "No clear label"}</strong>
+      <strong>${dominantLabel ? `${escapeHtml(titleCase(dominantLabel))} ·${Math.round(dominantScore * 100)}%` : "No clear label"}</strong>
     </div>
     <div class="emotion-model-layout">
       <div>${emotionRadarMarkup(scores)}</div>
       <div class="emotion-model-bars" role="list" aria-label="Neural emotion model scores">
         ${entries
-          .map(({ label, score }) => {
-            const percent = Math.round(score * 100);
-            const color = EMOTION_COLORS[label];
-            return `
+      .map(({ label, score }) => {
+        const percent = Math.round(score * 100);
+        const color = EMOTION_COLORS[label];
+        return `
               <div class="emotion-score-row" role="listitem" style="--bar-color: ${color}">
                 <span class="emotion-score-label"><span class="emotion-score-dot" style="--emotion-color: ${color}" aria-hidden="true"></span>${escapeHtml(titleCase(label))}</span>
                 <progress max="100" value="${(score * 100).toFixed(2)}" aria-label="${escapeHtml(titleCase(label))} model score, ${percent} percent">${percent}%</progress>
                 <span class="emotion-score-value" aria-hidden="true">${percent}%</span>
               </div>`;
-          })
-          .join("")}
+      })
+      .join("")}
       </div>
     </div>
     <p class="emotion-model-caution"><strong>Important:</strong> These are the model’s relative scores for seven possible labels—not measurements of what you actually feel. The model can misunderstand context and sarcasm.</p>
@@ -1008,6 +1012,19 @@ async function startEmotionAnalysis({ force = false } = {}) {
   }
 }
 
+function checkChallengeSuccess(challengeId, score, analysis) {
+  if (challengeId === "sarcasm") {
+    return score > 0.15;
+  }
+  if (challengeId === "clear-vibe") {
+    return Math.abs(score) >= 0.35;
+  }
+  if (challengeId === "mixed") {
+    return Math.abs(score) < 0.25;
+  }
+  return false;
+}
+
 function renderResults() {
   const analysis = state.analysis ?? analyzeSentiment(state.sentence);
   state.analysis = analysis;
@@ -1018,11 +1035,12 @@ function renderResults() {
   const agreement = agreementScore(tokens);
   const call = userCall();
   const emotions = analysis.emotions && Object.keys(analysis.emotions).length
-    ? analysis.emotions
-    : fallbackEmotions(score);
+      ? analysis.emotions
+      : fallbackEmotions(score);
   const emotionColors = ["#e4b73c", "#f05e58", "#6b9fd3", "#9a7bc4", "#61c976", "#e781a0", "#d3794a"];
   const nonZeroTokens = tokens.filter((token) => Math.abs(tokenWeight(token)) > 0.005);
   const summary = analysis.summary || `The model combined ${nonZeroTokens.length} emotional clue${nonZeroTokens.length === 1 ? "" : "s"} to place this message on the sentiment scale.`;
+  const passed = checkChallengeSuccess(challenges[state.challengeIndex].id, score, analysis);
   document.title = "VibeCheck — AI results";
 
   app.innerHTML = `
@@ -1079,31 +1097,31 @@ function renderResults() {
           <summary><span>Token-by-token explanations</span><span>${tokens.length} tokens</span></summary>
           <div class="weights-list" role="list" aria-label="Individual token sentiment weights">
             ${tokens
-              .map((token) => {
-                const weight = tokenWeight(token);
-                const direction = weight > 0.005 ? "is-positive" : weight < -0.005 ? "is-negative" : "";
-                const reason = token.reason || (direction ? "Sentiment clue" : "No strong sentiment signal");
-                return `
+      .map((token) => {
+        const weight = tokenWeight(token);
+        const direction = weight > 0.005 ? "is-positive" : weight < -0.005 ? "is-negative" : "";
+        const reason = token.reason || (direction ? "Sentiment clue" : "No strong sentiment signal");
+        return `
                   <div class="weight-row" role="listitem">
                     <span class="weight-word" title="${escapeHtml(token.text)}">${escapeHtml(token.text)}</span>
                     <span class="weight-bar" aria-hidden="true"><span class="weight-fill ${direction}" style="--amount: ${Math.abs(weight) * 50}%"></span></span>
                     <span class="weight-value ${direction}">${formatSigned(weight)}</span>
                     <span class="weight-reason">${escapeHtml(reason)}</span>
                   </div>`;
-              })
-              .join("")}
+      })
+      .join("")}
           </div>
         </details>
         <div class="calculation-box">
           <span class="tiny-label">Aggregate score calculation</span>
           <div class="formula-list">
             ${(nonZeroTokens.length ? nonZeroTokens : tokens.slice(0, 1))
-              .map((token, index, visibleTokens) => {
-                const weight = tokenWeight(token);
-                const direction = weight > 0.005 ? "is-positive" : weight < -0.005 ? "is-negative" : "";
-                return `<span class="formula-term${index === visibleTokens.length - 1 ? " is-last" : ""}"><span>${escapeHtml(token.text)}</span> <strong class="${direction}">${formatSigned(weight)}</strong></span>`;
-              })
-              .join("")}
+      .map((token, index, visibleTokens) => {
+        const weight = tokenWeight(token);
+        const direction = weight > 0.005 ? "is-positive" : weight < -0.005 ? "is-negative" : "";
+        return `<span class="formula-term${index === visibleTokens.length - 1 ? " is-last" : ""}"><span>${escapeHtml(token.text)}</span> <strong class="${direction}">${formatSigned(weight)}</strong></span>`;
+      })
+      .join("")}
             <span class="formula-total">${nonZeroTokens.length > 1 ? `÷ √${nonZeroTokens.length} = ` : "= "}Final ${formatSigned(score)}</span>
           </div>
         </div>
@@ -1115,16 +1133,16 @@ function renderResults() {
         <p>This shows how much positive, negative, and neutral evidence the prototype found—not facts about the writer.</p>
         <div class="emotion-grid">
           ${Object.entries(emotions)
-            .map(([emotion, rawValue], index) => {
-              const value = clamp(Number(rawValue), 0, 1);
-              return `
+      .map(([emotion, rawValue], index) => {
+        const value = clamp(Number(rawValue), 0, 1);
+        return `
                 <div class="emotion-row">
                   <span>${escapeHtml(titleCase(emotion))}</span>
-                  <span class="emotion-track" aria-hidden="true"><span class="emotion-fill" style="--value: ${Math.round(value * 100)}%; --emotion-color: ${emotionColors[index % emotionColors.length]}"></span></span>
+                  <span class="emotion-track" aria-hidden="true"><span class="emotion-fill" style="--value: ${Math.round(value * 100)}\%; --emotion-color:${emotionColors[index % emotionColors.length]}"></span></span>
                   <span>${Math.round(value * 100)}%</span>
                 </div>`;
-            })
-            .join("")}
+      })
+      .join("")}
         </div>
       </article>
 
@@ -1144,46 +1162,175 @@ function renderResults() {
 
       <div class="results-actions">
         <button class="text-button" id="adjust-map" type="button">Adjust my word map</button>
-        <button class="gradient-button" id="start-over" type="button">Try another message</button>
+        ${
+      passed
+          ? `<button class="gradient-button" id="next-challenge-btn" type="button">Next Challenge →</button>`
+          : `<button class="gradient-button" id="tweak-btn" type="button">Tweak in Lab →</button>`
+  }
       </div>
     </section>
   `;
 
   app.querySelector("#back-to-scale").addEventListener("click", () => navigate("scale"));
   app.querySelector("#adjust-map").addEventListener("click", () => navigate("scale"));
-  app.querySelector("#start-over").addEventListener("click", () => {
-    const challengeIndex = state.challengeIndex;
+
+  app.querySelector("#next-challenge-btn")?.addEventListener("click", () => {
+    state.challengeIndex = (state.challengeIndex + 1) % challenges.length;
     cancelEmotionAnalysis();
-    state = initialState();
-    state.challengeIndex = challengeIndex;
-    render();
-    focusScreenHeading();
-    showToast("Fresh page, fresh vibe.");
+    state = { ...initialState(), challengeIndex: state.challengeIndex };
+    navigate("input");
+  });
+
+  app.querySelector("#tweak-btn")?.addEventListener("click", () => {
+    state.tweakedSentence = state.sentence;
+    state.tweakedAnalysis = analyzeSentiment(state.sentence);
+    state.selectedTokenIndex = 0;
+    navigate("tweak");
   });
 
   bindEmotionPanelActions();
   void startEmotionAnalysis();
 }
 
-app.addEventListener("click", (event) => {
-  const switchButton = event.target instanceof Element
-    ? event.target.closest("[data-switch-participant]")
-    : null;
-  if (switchButton) void switchParticipant(switchButton);
-});
+function renderTweak() {
+  document.title = "VibeCheck — Tweak and Learn";
+  const challenge = challenges[state.challengeIndex];
+  const originalTokens = state.tokens;
+  const originalScore = state.analysis.score;
+  const originalLabel = titleCase(state.analysis.label);
 
-brand.addEventListener("click", (event) => {
-  event.preventDefault();
-  if (participantSession.status !== "ready") {
-    window.scrollTo({ top: 0, behavior: "smooth" });
-    return;
-  }
-  if (state.screen === "input") {
-    window.scrollTo({ top: 0, behavior: "smooth" });
-    return;
-  }
-  navigate("input");
-});
+  const currentTokens = tokenizeSentence(state.tweakedSentence);
+  const tweakedAnalysis = state.tweakedAnalysis ?? analyzeSentiment(state.tweakedSentence);
+  const tweakedScore = tweakedAnalysis.score;
+  const tweakedLabel = titleCase(tweakedAnalysis.label);
+  const isComplete = checkChallengeSuccess(challenge.id, tweakedScore, tweakedAnalysis);
+
+  app.innerHTML = `
+    <section class="screen" aria-labelledby="tweak-title">
+      ${participantIdentityMarkup()}
+      <button class="back-button" id="back-to-results" type="button">← Back to AI Pipeline</button>
+
+      <div class="paper-card tweak-card">
+        <div class="tweak-header">
+          <span class="tiny-label">Tweak Lab</span>
+          <span class="status-pill ${isComplete ? 'is-complete' : ''}">
+            ${isComplete ? "Challenge Complete! ✓" : "Challenge Incomplete"}
+          </span>
+        </div>
+        <h2 id="tweak-title">Change a single token and watch the sentiment swing</h2>
+
+        <!-- Interactive Tokens -->
+        <div class="token-cloud tweak-tokens" role="group" aria-label="Select token to replace">
+          ${currentTokens.map((token, index) => `
+            <button 
+              type="button" 
+              class="token-chip ${index === state.selectedTokenIndex ? 'is-active-token' : ''}" 
+              data-token-idx="${index}">
+              ${escapeHtml(token.text)}
+            </button>
+          `).join("")}
+        </div>
+
+        <!-- Replacement Form -->
+        <form id="tweak-form" class="tweak-input-row">
+          <input 
+            type="text" 
+            id="token-replacement" 
+            class="name-input" 
+            placeholder="Type your replacement word..." 
+            autocomplete="off" 
+            required 
+          />
+          <button type="submit" class="apply-button">Apply</button>
+        </form>
+
+        <!-- Before and After Comparison -->
+        <div class="tweak-comparison">
+          <div class="comparison-box before-box">
+            <span class="comp-label">BEFORE</span>
+            <strong>${escapeHtml(originalLabel)}</strong>
+            <span class="score-tag">${formatSigned(originalScore, 1)}</span>
+          </div>
+          <div class="comparison-box after-box">
+            <span class="comp-label">AFTER</span>
+            <strong>${escapeHtml(tweakedLabel)}</strong>
+            <span class="score-tag ${tweakedScore > 0 ? 'pos' : 'neg'}">${formatSigned(tweakedScore, 1)}</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Reflection Section -->
+      <div class="stage-heading" style="margin-top: 36px; text-align: left;">
+        <span class="tiny-label">What do you feel you learned?</span>
+      </div>
+      
+      <div class="reflection-grid">
+        <div class="paper-card reflection-card">
+          <span class="badge blue">Sentiment Analysis</span>
+          <p>AI assigns static weights to words, then processes contextual layers to compute an overall metric shift.</p>
+        </div>
+        <div class="paper-card reflection-card">
+          <span class="badge yellow">Word Embeddings</span>
+          <p>Words map to coordinate systems. Closely aligned words inhabit mutual cluster segments to preserve spatial logic.</p>
+        </div>
+        <div class="paper-card reflection-card">
+          <span class="badge green">AI Ethics & Bias</span>
+          <p>Models fail when encountering non-standard grammar, slang, or community dialects due to underlying training bias.</p>
+        </div>
+      </div>
+
+      <!-- Bottom Next / Try Again Action -->
+      <div class="paper-card completion-banner">
+        <p class="eyebrow" style="justify-content: center;">🎉 Challenge Complete!</p>
+        <p class="banner-subtext">You engineered your sentence successfully and discovered how the AI model computes sentiment shifts.</p>
+        <button class="gradient-button full-width" id="finish-challenge" type="button" ${isComplete ? "" : "disabled"}>
+          Next Challenge →
+        </button>
+        <button class="text-button" id="tweak-retry" type="button" style="margin: 12px auto 0; display: block;">
+          Try Another Message
+        </button>
+      </div>
+    </section>
+  `;
+
+  // Event handlers
+  app.querySelector("#back-to-results").addEventListener("click", () => navigate("results"));
+
+  app.querySelectorAll("[data-token-idx]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      state.selectedTokenIndex = Number(btn.dataset.tokenIdx);
+      renderTweak();
+      app.querySelector("#token-replacement").focus();
+    });
+  });
+
+  const form = app.querySelector("#tweak-form");
+  const input = app.querySelector("#token-replacement");
+  form.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const replacement = input.value.trim();
+    if (!replacement) return;
+
+    const words = currentTokens.map((t) => t.text);
+    words[state.selectedTokenIndex] = replacement;
+    state.tweakedSentence = words.join(" ");
+    state.tweakedAnalysis = analyzeSentiment(state.tweakedSentence);
+    renderTweak();
+  });
+
+  app.querySelector("#finish-challenge").addEventListener("click", () => {
+    state.challengeIndex = (state.challengeIndex + 1) % challenges.length;
+    cancelEmotionAnalysis();
+    state = { ...initialState(), challengeIndex: state.challengeIndex };
+    navigate("input");
+  });
+
+  app.querySelector("#tweak-retry").addEventListener("click", () => {
+    cancelEmotionAnalysis();
+    state = { ...initialState(), challengeIndex: state.challengeIndex };
+    navigate("input");
+  });
+}
 
 render();
 void loadParticipantSession();
