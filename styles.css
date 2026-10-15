@@ -1706,19 +1706,29 @@ input[type="range"] {
   text-align: center;
 }
 
-tweak-card {
-  padding: clamp(20px, 4vw, 32px);
+.tweak-card {
+  padding: clamp(24px, 4vw, 40px);
   margin-top: 18px;
+}
+
+.tweak-card h2 {
+  max-width: 900px;
+  margin: 0 0 clamp(20px, 3vw, 28px);
+  font-size: clamp(1.45rem, 3vw, 2.2rem);
+  line-height: 1.25;
 }
 
 .tweak-header {
   display: flex;
-  justify-content: space-between;
   align-items: center;
-  margin-bottom: 12px;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
 }
 
 .status-pill {
+  flex: 0 0 auto;
   padding: 5px 12px;
   border: 1.5px solid var(--ink);
   border-radius: 99px;
@@ -1733,24 +1743,45 @@ tweak-card {
   color: var(--positive-dark);
 }
 
+.tweak-tokens {
+  min-height: 68px;
+  align-items: center;
+  gap: 10px;
+  padding: 14px;
+  border: 1.5px dashed rgba(32, 34, 31, 0.42);
+  border-radius: 12px;
+  background: rgba(244, 240, 221, 0.62);
+}
+
+.tweak-tokens .token-chip {
+  min-height: 40px;
+  padding: 8px 12px;
+  cursor: pointer;
+}
+
 .tweak-tokens .is-active-token {
   outline: 3px solid #317cc0;
+  outline-offset: 2px;
   background: #fff8ce;
   transform: translateY(-2px);
 }
 
 .tweak-input-row {
-  display: flex;
-  gap: 12px;
-  margin: 18px 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: stretch;
+  gap: 14px;
+  margin: 24px 0;
 }
 
 .tweak-input-row .name-input {
-  flex: 1;
+  min-width: 0;
 }
 
 .apply-button {
-  padding: 0 24px;
+  min-width: 120px;
+  min-height: 54px;
+  padding: 12px 24px;
   border: var(--border);
   border-radius: 10px;
   background: var(--neutral-soft);
@@ -1767,13 +1798,15 @@ tweak-card {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 16px;
-  margin-top: 20px;
 }
 
 .comparison-box {
-  display: flex;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  min-width: 0;
+  min-height: 68px;
   align-items: center;
-  justify-content: space-between;
+  gap: 16px;
   padding: 12px 18px;
   border-radius: 9px;
   border: 1.5px solid;
@@ -1812,7 +1845,7 @@ tweak-card {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
   gap: 16px;
-  margin-bottom: 24px;
+  margin: 24px 0;
 }
 
 .reflection-card {
@@ -1903,6 +1936,9 @@ tweak-card {
   .emotion-model-callout { align-items: flex-start; flex-direction: column; gap: 8px; }
   .model-kind { order: -1; }
   .emotion-score-row { grid-template-columns: 78px minmax(80px, 1fr) 42px; gap: 7px; }
+  .tweak-card { padding: 20px 16px; }
+  .tweak-input-row { grid-template-columns: 1fr; gap: 10px; }
+  .apply-button { width: 100%; }
   .classification-top { flex-direction: column; }
   .confidence-badge { order: -1; }
   .results-actions { flex-direction: column; gap: 14px; }

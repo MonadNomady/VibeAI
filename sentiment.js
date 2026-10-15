@@ -98,6 +98,7 @@ const WORD_SENTIMENT = Object.freeze({
   genuine: 0.42,
   glad: 0.68,
   glorious: 0.82,
+  goated: 0.9,
   good: 0.68,
   gorgeous: 0.86,
   grateful: 0.76,

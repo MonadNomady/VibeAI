@@ -407,7 +407,7 @@ function renderInput() {
           <span class="challenge-label">Active challenge</span>
           <p class="challenge-prompt">${escapeHtml(challenge.prompt)}</p>
         </article>
-        <button class="round-button" id="next-challenge" type="button" aria-label="Next challenge">→</button>
+        <button class="round-button" id="next-challenge" type="button" aria-label="Next challenge"></button>
       </div>
 
       <div class="challenge-dots" role="group" aria-label="Challenge choices">
@@ -1164,8 +1164,8 @@ function renderResults() {
         <button class="text-button" id="adjust-map" type="button">Adjust my word map</button>
         ${
       passed
-          ? `<button class="gradient-button" id="next-challenge-btn" type="button">Next Challenge →</button>`
-          : `<button class="gradient-button" id="tweak-btn" type="button">Tweak in Lab →</button>`
+          ? `<button class="gradient-button" id="next-challenge-btn" type="button">Next Challenge</button>`
+          : `<button class="gradient-button" id="tweak-btn" type="button">Tweak in Lab</button>`
   }
       </div>
     </section>
@@ -1260,10 +1260,6 @@ function renderTweak() {
       </div>
 
       <!-- Reflection Section -->
-      <div class="stage-heading" style="margin-top: 36px; text-align: left;">
-        <span class="tiny-label">What do you feel you learned?</span>
-      </div>
-      
       <div class="reflection-grid">
         <div class="paper-card reflection-card">
           <span class="badge blue">Sentiment Analysis</span>
@@ -1284,7 +1280,7 @@ function renderTweak() {
         <p class="eyebrow" style="justify-content: center;">🎉 Challenge Complete!</p>
         <p class="banner-subtext">You engineered your sentence successfully and discovered how the AI model computes sentiment shifts.</p>
         <button class="gradient-button full-width" id="finish-challenge" type="button" ${isComplete ? "" : "disabled"}>
-          Next Challenge →
+          Next Challenge
         </button>
         <button class="text-button" id="tweak-retry" type="button" style="margin: 12px auto 0; display: block;">
           Try Another Message
