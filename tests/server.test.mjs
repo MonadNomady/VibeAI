@@ -39,14 +39,32 @@ function close(server) {
 async function createFixture(t) {
   const directory = mkdtempSync(join(tmpdir(), "vibecheck-server-"));
   const rootDirectory = join(directory, "public");
+  const hampterDirectory = join(rootDirectory, "hampters");
 
   mkdirSync(rootDirectory, { recursive: true });
+  mkdirSync(hampterDirectory, { recursive: true });
   writeFileSync(
     join(rootDirectory, "index.html"),
     "<!doctype html><html><body><main>VibeCheck fixture page</main></body></html>",
   );
   writeFileSync(join(rootDirectory, "emotion-model.js"), "export const EMOTION_LABELS = [];\n");
   writeFileSync(join(rootDirectory, "emotion-worker.js"), "self.onmessage = () => {};\n");
+  const tinyPng = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M/wHwAF/gL+AvzV6QAAAABJRU5ErkJggg==",
+    "base64",
+  );
+  for (const filename of [
+    "anger_hampter.png",
+    "disgust_hampter.png",
+    "emotion_placeholder.png",
+    "fear_hampter.png",
+    "joy_hampter.png",
+    "neutral_hampter.png",
+    "sadness_hampter.png",
+    "surprise_hampter.png",
+  ]) {
+    writeFileSync(join(hampterDirectory, filename), tinyPng);
+  }
   writeFileSync(join(rootDirectory, "server.mjs"), "SERVER_FILE_MUST_NOT_BE_PUBLIC");
   writeFileSync(join(rootDirectory, "package.json"), "PACKAGE_FILE_MUST_NOT_BE_PUBLIC");
   writeFileSync(join(directory, "outside-secret.txt"), "PATH_TRAVERSAL_MUST_NOT_WORK");
@@ -450,6 +468,26 @@ test("the browser emotion modules are served as JavaScript", async (t) => {
     assert.equal(response.status, 200, path);
     assert.match(response.headers.get("content-type") ?? "", /^text\/javascript\b/i, path);
     assert((await response.text()).length > 0, path);
+  }
+});
+
+test("the emotion hamster artwork is served as PNG", async (t) => {
+  const { baseUrl } = await createFixture(t);
+
+  for (const path of [
+    "/hampters/anger_hampter.png",
+    "/hampters/disgust_hampter.png",
+    "/hampters/emotion_placeholder.png",
+    "/hampters/fear_hampter.png",
+    "/hampters/joy_hampter.png",
+    "/hampters/neutral_hampter.png",
+    "/hampters/sadness_hampter.png",
+    "/hampters/surprise_hampter.png",
+  ]) {
+    const response = await fetch(`${baseUrl}${path}`);
+    assert.equal(response.status, 200, path);
+    assert.match(response.headers.get("content-type") ?? "", /^image\/png\b/i, path);
+    assert((await response.arrayBuffer()).byteLength > 0, path);
   }
 });
 

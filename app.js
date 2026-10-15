@@ -20,6 +20,18 @@ const EMOTION_COLORS = {
   surprise: "#d579b0",
 };
 
+const EMOTION_HAMPTER_PLACEHOLDER = "/hampters/emotion_placeholder.png";
+const EMOTION_HAMPTER_IMAGES = Object.freeze({
+  anger: "/hampters/anger_hampter.png",
+  disgust: "/hampters/disgust_hampter.png",
+  fear: "/hampters/fear_hampter.png",
+  sadness: "/hampters/sadness_hampter.png",
+  surprise: "/hampters/surprise_hampter.png",
+  joy: "/hampters/joy_hampter.png",
+  neutral: "/hampters/neutral_hampter.png",
+
+});
+
 const challenges = [
   {
     id: "sarcasm",
@@ -874,11 +886,27 @@ function emotionReadyMarkup(scores) {
   const dominant = getDominantEmotion(scores);
   const dominantLabel = dominant?.label ?? null;
   const dominantScore = clamp(Number(dominant?.score ?? 0), 0, 1);
+  const dominantTitle = dominantLabel ? titleCase(dominantLabel) : "";
+  const hampterImage = dominantLabel
+    ? EMOTION_HAMPTER_IMAGES[dominantLabel] ?? EMOTION_HAMPTER_PLACEHOLDER
+    : null;
+  const hasEmotionArtwork = Boolean(
+    dominantLabel && EMOTION_HAMPTER_IMAGES[dominantLabel],
+  );
 
   return `
     <div class="emotion-model-callout" id="emotion-model-status" role="status" aria-live="polite" aria-atomic="true" tabindex="-1">
-      <span>Neural model’s strongest label</span>
-      <strong>${dominantLabel ? `${escapeHtml(titleCase(dominantLabel))} ·${Math.round(dominantScore * 100)}%` : "No clear label"}</strong>
+      <div class="emotion-model-callout-copy">
+        <span>Neural model’s strongest label</span>
+        <strong>${dominantLabel ? `${escapeHtml(dominantTitle)} · ${Math.round(dominantScore * 100)}%` : "No clear label"}</strong>
+      </div>
+      ${hampterImage ? `
+        <figure class="emotion-hampter">
+          <div class="emotion-hampter-stage">
+            <img class="emotion-hampter-image" data-emotion="${escapeHtml(dominantLabel)}" src="${hampterImage}" alt="" decoding="async">
+          </div>
+          <figcaption>${escapeHtml(dominantTitle)} hamster${hasEmotionArtwork ? "" : " coming soon"}</figcaption>
+        </figure>` : ""}
     </div>
     <div class="emotion-model-layout">
       <div>${emotionRadarMarkup(scores)}</div>

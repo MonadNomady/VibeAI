@@ -25,12 +25,21 @@ const publicFiles = new Map([
   ["/emotion-worker.js", "emotion-worker.js"],
   ["/sentiment.js", "sentiment.js"],
   ["/styles.css", "styles.css"],
+  ["/hampters/anger_hampter.png", "hampters/anger_hampter.png"],
+  ["/hampters/disgust_hampter.png", "hampters/disgust_hampter.png"],
+  ["/hampters/emotion_placeholder.png", "hampters/emotion_placeholder.png"],
+  ["/hampters/fear_hampter.png", "hampters/fear_hampter.png"],
+  ["/hampters/joy_hampter.png", "hampters/joy_hampter.png"],
+  ["/hampters/neutral_hampter.png", "hampters/neutral_hampter.png"],
+  ["/hampters/sadness_hampter.png", "hampters/sadness_hampter.png"],
+  ["/hampters/surprise_hampter.png", "hampters/surprise_hampter.png"],
 ]);
 
 const contentTypes = {
   ".css": "text/css; charset=utf-8",
   ".html": "text/html; charset=utf-8",
   ".js": "text/javascript; charset=utf-8",
+  ".png": "image/png",
 };
 
 function listen(server, port) {
