@@ -34,6 +34,58 @@ test('positive and negative language produce bounded, explainable results', () =
   }
 });
 
+test('expanded classroom and social vocabulary is recognized', () => {
+  const positiveWords = [
+    'accepted',
+    'accomplished',
+    'brave',
+    'encouraging',
+    'included',
+    'motivated',
+    'respected',
+    'supported',
+    'trustworthy',
+    'wholesome',
+  ];
+  const negativeWords = [
+    'betrayed',
+    'bullied',
+    'embarrassed',
+    'excluded',
+    'frustrated',
+    'ignored',
+    'overwhelmed',
+    'toxic',
+    'unfair',
+    'unwelcome',
+  ];
+
+  for (const word of positiveWords) {
+    const result = analyzeSentiment(word);
+    assert.equal(result.label, 'positive', word);
+    assert(result.tokens[0].weight > 0, word);
+  }
+
+  for (const word of negativeWords) {
+    const result = analyzeSentiment(word);
+    assert.equal(result.label, 'negative', word);
+    assert(result.tokens[0].weight < 0, word);
+  }
+});
+
+test('expanded informal vocabulary contributes without changing literal analysis', () => {
+  const praise = analyzeSentiment('That game was goated and lit!');
+  const criticism = analyzeSentiment('That scam was mid and trash.');
+
+  assert.equal(praise.label, 'positive');
+  assert(praise.tokens.find((token) => token.normalized === 'goated').weight > 0);
+  assert(praise.tokens.find((token) => token.normalized === 'lit').weight > 0);
+  assert.equal(criticism.label, 'negative');
+  assert(criticism.tokens.find((token) => token.normalized === 'scam').weight < 0);
+  assert(criticism.tokens.find((token) => token.normalized === 'mid').weight < 0);
+  assert(criticism.tokens.find((token) => token.normalized === 'trash').weight < 0);
+});
+
 test('negation reverses the next nearby sentiment cue', () => {
   const ordinary = analyzeSentiment('This is good.');
   const negated = analyzeSentiment('This is not good.');
