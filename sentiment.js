@@ -602,6 +602,20 @@ export function tokenizeSentence(sentence = '') {
   });
 }
 
+/**
+ * Apply the classroom challenge rules to a word-model score. Keeping these
+ * rules shared lets the browser and server report the same pass result.
+ */
+export function didPassChallenge(challengeId, score) {
+  const numericScore = Number(score);
+  if (!Number.isFinite(numericScore)) return false;
+
+  if (challengeId === 'sarcasm') return numericScore > 0.15;
+  if (challengeId === 'clear-vibe') return Math.abs(numericScore) >= 0.35;
+  if (challengeId === 'mixed') return Math.abs(numericScore) < 0.25;
+  return false;
+}
+
 function findModifiers(tokens, sentimentIndex, rawWeights) {
   let multiplier = 1;
   let isNegated = false;

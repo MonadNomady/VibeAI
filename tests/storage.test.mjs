@@ -37,6 +37,10 @@ async function addParticipant(store, overrides = {}) {
   return store.createParticipant(participantInput(overrides));
 }
 
+function waitForClockTick() {
+  return new Promise((resolve) => setTimeout(resolve, 10));
+}
+
 test("participants and their sentences persist when the store reconnects", async () => {
   const database = createMemoryDatabase();
   const firstStore = await createSentenceStore({ pool: createPool(database) });
@@ -178,6 +182,191 @@ test("saveSentence records its participant, trims input, and records a UTC times
   assert(timestamp >= before - 1_000 && timestamp <= after + 1_000);
 });
 
+test("saveScaleResult stores and replaces an ordered vibe-scale snapshot", async (t) => {
+  const { store } = await createTestStore(t);
+  const participant = await addParticipant(store);
+  const submission = await store.saveSentence({
+    sentence: "Wow 😊!",
+    challengeId: "clear-vibe",
+    participantId: participant.id,
+  });
+  const firstPlacements = [
+    { tokenIndex: 0, tokenText: "Wow", rating: 1 },
+    { tokenIndex: 1, tokenText: "😊", rating: 1 },
+    { tokenIndex: 2, tokenText: "!", rating: 0 },
+  ];
+
+  const firstResult = await store.saveScaleResult({
+    submissionId: submission.id,
+    participantId: participant.id,
+    placements: firstPlacements,
+    challengePassed: true,
+  });
+
+  assert.equal(firstResult.initialChallengePassed, true);
+  assert.equal(firstResult.challengePassed, true);
+  assert.match(firstResult.challengeCompletedAt, /^\d{4}-\d{2}-\d{2}T/);
+  assert.match(firstResult.scaleSubmittedAt, /^\d{4}-\d{2}-\d{2}T/);
+  assert.deepEqual(firstResult.wordPlacements, firstPlacements);
+  assert.deepEqual(await store.getById(submission.id), firstResult);
+
+  const replacementPlacements = firstPlacements.map((placement) => ({
+    ...placement,
+    rating: placement.tokenIndex === 0 ? -1 : 0,
+  }));
+  await waitForClockTick();
+  const replacement = await store.saveScaleResult({
+    submissionId: submission.id,
+    participantId: participant.id,
+    placements: replacementPlacements,
+    challengePassed: false,
+  });
+
+  assert.equal(replacement.initialChallengePassed, true);
+  assert.equal(replacement.challengePassed, true);
+  assert.equal(replacement.challengeCompletedAt, firstResult.challengeCompletedAt);
+  assert.equal(replacement.scaleSubmittedAt, firstResult.scaleSubmittedAt);
+  assert.deepEqual(replacement.wordPlacements, replacementPlacements);
+  assert.deepEqual(await store.getById(submission.id), replacement);
+});
+
+test("saveScaleResult validates placements and enforces submission ownership", async (t) => {
+  const { store } = await createTestStore(t);
+  const owner = await addParticipant(store);
+  const otherLearner = await addParticipant(store);
+  const submission = await store.saveSentence({
+    sentence: "A valid sentence.",
+    challengeId: "mixed",
+    participantId: owner.id,
+  });
+  const valid = {
+    submissionId: submission.id,
+    participantId: owner.id,
+    challengePassed: true,
+    placements: [{ tokenIndex: 0, tokenText: "A", rating: 0 }],
+  };
+
+  await assert.rejects(
+    store.saveScaleResult({ ...valid, placements: [] }),
+    /non-empty array/i,
+  );
+  await assert.rejects(
+    store.saveScaleResult({
+      ...valid,
+      placements: [{ tokenIndex: 1, tokenText: "A", rating: 0 }],
+    }),
+    /contiguous/i,
+  );
+  await assert.rejects(
+    store.saveScaleResult({
+      ...valid,
+      placements: [{ tokenIndex: 0, tokenText: "A", rating: 0.5 }],
+    }),
+    /rating/i,
+  );
+  await assert.rejects(
+    store.saveScaleResult({ ...valid, challengePassed: "yes" }),
+    /challengePassed/i,
+  );
+  assert.equal(
+    await store.saveScaleResult({ ...valid, participantId: otherLearner.id }),
+    null,
+  );
+
+  const unchanged = await store.getById(submission.id);
+  assert.equal(unchanged.initialChallengePassed, null);
+  assert.equal(unchanged.challengePassed, null);
+  assert.equal(unchanged.challengeCompletedAt, null);
+  assert.equal(unchanged.scaleSubmittedAt, null);
+  assert.deepEqual(unchanged.wordPlacements, []);
+});
+
+test("completeChallenge records a later pass without changing the initial result", async (t) => {
+  const { store } = await createTestStore(t);
+  const participant = await addParticipant(store);
+  const submission = await store.saveSentence({
+    sentence: "The concert was fine.",
+    challengeId: "clear-vibe",
+    participantId: participant.id,
+  });
+  const revealed = await store.saveScaleResult({
+    submissionId: submission.id,
+    participantId: participant.id,
+    placements: [
+      { tokenIndex: 0, tokenText: "The", rating: 0 },
+      { tokenIndex: 1, tokenText: "concert", rating: 0 },
+      { tokenIndex: 2, tokenText: "was", rating: 0 },
+      { tokenIndex: 3, tokenText: "fine", rating: 1 },
+      { tokenIndex: 4, tokenText: ".", rating: 0 },
+    ],
+    challengePassed: false,
+  });
+
+  assert.equal(revealed.initialChallengePassed, false);
+  assert.equal(revealed.challengePassed, false);
+  assert.equal(revealed.challengeCompletedAt, null);
+
+  const completed = await store.completeChallenge({
+    submissionId: submission.id,
+    participantId: participant.id,
+  });
+
+  assert.equal(completed.initialChallengePassed, false);
+  assert.equal(completed.challengePassed, true);
+  assert.match(completed.challengeCompletedAt, /^\d{4}-\d{2}-\d{2}T/);
+  assert.equal(completed.sentence, submission.sentence);
+
+  await waitForClockTick();
+  const repeated = await store.completeChallenge({
+    submissionId: submission.id,
+    participantId: participant.id,
+  });
+  assert.equal(repeated.initialChallengePassed, false);
+  assert.equal(repeated.challengePassed, true);
+  assert.equal(repeated.challengeCompletedAt, completed.challengeCompletedAt);
+  const stored = await store.getById(submission.id);
+  assert.equal(stored.initialChallengePassed, false);
+  assert.equal(stored.challengePassed, true);
+  assert.equal(stored.challengeCompletedAt, completed.challengeCompletedAt);
+});
+
+test("completeChallenge enforces submission ownership", async (t) => {
+  const { store } = await createTestStore(t);
+  const owner = await addParticipant(store);
+  const otherLearner = await addParticipant(store);
+  const submission = await store.saveSentence({
+    sentence: "The concert happened.",
+    challengeId: "clear-vibe",
+    participantId: owner.id,
+  });
+  await store.saveScaleResult({
+    submissionId: submission.id,
+    participantId: owner.id,
+    placements: [{ tokenIndex: 0, tokenText: "The", rating: 0 }],
+    challengePassed: false,
+  });
+
+  assert.equal(
+    await store.completeChallenge({
+      submissionId: submission.id,
+      participantId: otherLearner.id,
+    }),
+    null,
+  );
+  assert.equal(
+    await store.completeChallenge({
+      submissionId: 999_999,
+      participantId: owner.id,
+    }),
+    null,
+  );
+
+  const unchanged = await store.getById(submission.id);
+  assert.equal(unchanged.initialChallengePassed, false);
+  assert.equal(unchanged.challengePassed, false);
+  assert.equal(unchanged.challengeCompletedAt, null);
+});
+
 test("sentence validation rejects malformed submissions and missing participants", async (t) => {
   const { store } = await createTestStore(t);
   const participant = await addParticipant(store);
@@ -286,6 +475,11 @@ test("startup migrates existing submissions to the legacy participant", async ()
 
     assert.equal(migrated.sentence, "Saved before participant names existed.");
     assert.equal(migrated.participantId, 0);
+    assert.equal(migrated.initialChallengePassed, null);
+    assert.equal(migrated.challengePassed, null);
+    assert.equal(migrated.challengeCompletedAt, null);
+    assert.equal(migrated.scaleSubmittedAt, null);
+    assert.deepEqual(migrated.wordPlacements, []);
     assert.equal(legacyParticipant.id, 0);
     assert.equal(legacyParticipant.isLegacy, true);
     assert.match(legacyParticipant.displayName, /before names|legacy/i);
@@ -294,6 +488,56 @@ test("startup migrates existing submissions to the legacy participant", async ()
     const participant = await addParticipant(store, { displayName: "New learner" });
     assert(participant.id > 0);
     assert.equal(await store.countParticipants(), 1);
+  } finally {
+    await store.close();
+  }
+});
+
+test("startup backfills initial and completion fields from the previous result schema", async () => {
+  const database = createMemoryDatabase();
+  const setupPool = createPool(database);
+  await setupPool.query(`
+    CREATE TABLE sentence_submissions (
+      id SERIAL PRIMARY KEY,
+      participant_id BIGINT NOT NULL,
+      sentence VARCHAR(240) NOT NULL CHECK (sentence <> ''),
+      challenge_id TEXT NOT NULL CHECK (challenge_id IN ('sarcasm', 'clear-vibe', 'mixed')),
+      challenge_passed BOOLEAN,
+      scale_submitted_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    INSERT INTO sentence_submissions (
+      participant_id,
+      sentence,
+      challenge_id,
+      challenge_passed,
+      scale_submitted_at
+    ) VALUES
+      (0, 'Previously passed.', 'clear-vibe', TRUE, '2026-01-02T03:04:05.000Z'),
+      (0, 'Previously failed.', 'clear-vibe', FALSE, '2026-02-03T04:05:06.000Z'),
+      (0, 'Not evaluated yet.', 'mixed', NULL, '2026-03-04T05:06:07.000Z');
+  `);
+  await setupPool.end();
+
+  const store = await createSentenceStore({ pool: createPool(database) });
+  try {
+    const passed = await store.getById(1);
+    assert.equal(passed.initialChallengePassed, true);
+    assert.equal(passed.challengePassed, true);
+    assert.equal(passed.scaleSubmittedAt, "2026-01-02T03:04:05.000Z");
+    assert.equal(passed.challengeCompletedAt, passed.scaleSubmittedAt);
+
+    const failed = await store.getById(2);
+    assert.equal(failed.initialChallengePassed, false);
+    assert.equal(failed.challengePassed, false);
+    assert.equal(failed.scaleSubmittedAt, "2026-02-03T04:05:06.000Z");
+    assert.equal(failed.challengeCompletedAt, null);
+
+    const unevaluated = await store.getById(3);
+    assert.equal(unevaluated.initialChallengePassed, null);
+    assert.equal(unevaluated.challengePassed, null);
+    assert.equal(unevaluated.scaleSubmittedAt, "2026-03-04T05:06:07.000Z");
+    assert.equal(unevaluated.challengeCompletedAt, null);
   } finally {
     await store.close();
   }
@@ -369,6 +613,19 @@ test("store methods reject calls after the connection pool closes", async () => 
   await assert.rejects(store.revokeParticipantSession("a".repeat(64)), /closed/);
   await assert.rejects(
     store.saveSentence({ sentence: "Too late", challengeId: "mixed", participantId: 1 }),
+    /closed/,
+  );
+  await assert.rejects(
+    store.saveScaleResult({
+      submissionId: 1,
+      participantId: 1,
+      placements: [{ tokenIndex: 0, tokenText: "Too", rating: 0 }],
+      challengePassed: false,
+    }),
+    /closed/,
+  );
+  await assert.rejects(
+    store.completeChallenge({ submissionId: 1, participantId: 1 }),
     /closed/,
   );
 });

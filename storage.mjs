@@ -5,6 +5,7 @@ const { Pool } = pg;
 const CHALLENGE_IDS = new Set(["sarcasm", "clear-vibe", "mixed"]);
 const MAX_SENTENCE_LENGTH = 240;
 const MAX_DISPLAY_NAME_LENGTH = 40;
+const MAX_SCALE_PLACEMENTS = MAX_SENTENCE_LENGTH;
 const DEFAULT_POOL_SIZE = 3;
 
 const CREATE_PARTICIPANTS_SQL = `
@@ -29,6 +30,10 @@ const CREATE_SUBMISSIONS_SQL = `
     participant_id BIGINT NOT NULL,
     sentence VARCHAR(${MAX_SENTENCE_LENGTH}) NOT NULL CHECK (sentence <> ''),
     challenge_id TEXT NOT NULL CHECK (challenge_id IN ('sarcasm', 'clear-vibe', 'mixed')),
+    initial_challenge_passed BOOLEAN,
+    challenge_passed BOOLEAN,
+    challenge_completed_at TIMESTAMPTZ,
+    scale_submitted_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
   )
 `;
@@ -36,6 +41,26 @@ const CREATE_SUBMISSIONS_SQL = `
 const ADD_PARTICIPANT_COLUMN_SQL = `
   ALTER TABLE sentence_submissions
   ADD COLUMN IF NOT EXISTS participant_id BIGINT
+`;
+
+const ADD_CHALLENGE_PASSED_COLUMN_SQL = `
+  ALTER TABLE sentence_submissions
+  ADD COLUMN IF NOT EXISTS challenge_passed BOOLEAN
+`;
+
+const ADD_INITIAL_CHALLENGE_PASSED_COLUMN_SQL = `
+  ALTER TABLE sentence_submissions
+  ADD COLUMN IF NOT EXISTS initial_challenge_passed BOOLEAN
+`;
+
+const ADD_CHALLENGE_COMPLETED_COLUMN_SQL = `
+  ALTER TABLE sentence_submissions
+  ADD COLUMN IF NOT EXISTS challenge_completed_at TIMESTAMPTZ
+`;
+
+const ADD_SCALE_SUBMITTED_COLUMN_SQL = `
+  ALTER TABLE sentence_submissions
+  ADD COLUMN IF NOT EXISTS scale_submitted_at TIMESTAMPTZ
 `;
 
 const DROP_PARTICIPANT_FOREIGN_KEY_SQL = `
@@ -49,7 +74,19 @@ const ADD_PARTICIPANT_FOREIGN_KEY_SQL = `
   FOREIGN KEY (participant_id) REFERENCES participants(id) ON DELETE RESTRICT
 `;
 
-function normalizeSentence(sentence) {
+const CREATE_VIBE_SCALE_PLACEMENTS_SQL = `
+  CREATE TABLE IF NOT EXISTS vibe_scale_placements (
+    submission_id BIGINT NOT NULL,
+    token_index SMALLINT NOT NULL CHECK (token_index >= 0),
+    token_text VARCHAR(${MAX_SENTENCE_LENGTH}) NOT NULL CHECK (token_text <> ''),
+    rating SMALLINT NOT NULL CHECK (rating IN (-1, 0, 1)),
+    PRIMARY KEY (submission_id, token_index),
+    CONSTRAINT vibe_scale_placements_submission_fk
+      FOREIGN KEY (submission_id) REFERENCES sentence_submissions(id) ON DELETE CASCADE
+  )
+`;
+
+export function normalizeSentence(sentence) {
   if (typeof sentence !== "string") {
     throw new TypeError("sentence must be a string");
   }
@@ -111,6 +148,49 @@ function validateParticipantLookupId(id) {
   return id;
 }
 
+function normalizeScalePlacements(placements) {
+  if (!Array.isArray(placements) || placements.length === 0) {
+    throw new TypeError("placements must be a non-empty array");
+  }
+  if (placements.length > MAX_SCALE_PLACEMENTS) {
+    throw new RangeError(`placements must contain at most ${MAX_SCALE_PLACEMENTS} tokens`);
+  }
+
+  return placements.map((placement, expectedIndex) => {
+    if (!placement || Array.isArray(placement) || typeof placement !== "object") {
+      throw new TypeError("each placement must be an object");
+    }
+    if (placement.tokenIndex !== expectedIndex) {
+      throw new RangeError("placement token indexes must be contiguous and start at zero");
+    }
+    if (typeof placement.tokenText !== "string" || placement.tokenText.length === 0) {
+      throw new TypeError("placement tokenText must be a non-empty string");
+    }
+    if (placement.tokenText.includes("\0")) {
+      throw new RangeError("placement tokenText must not contain null characters");
+    }
+    if ([...placement.tokenText].length > MAX_SENTENCE_LENGTH) {
+      throw new RangeError(`placement tokenText must be ${MAX_SENTENCE_LENGTH} characters or fewer`);
+    }
+    if (!Number.isInteger(placement.rating) || ![-1, 0, 1].includes(placement.rating)) {
+      throw new RangeError("placement rating must be -1, 0, or 1");
+    }
+
+    return Object.freeze({
+      tokenIndex: expectedIndex,
+      tokenText: placement.tokenText,
+      rating: placement.rating,
+    });
+  });
+}
+
+function validateChallengePassed(challengePassed) {
+  if (typeof challengePassed !== "boolean") {
+    throw new TypeError("challengePassed must be a boolean");
+  }
+  return challengePassed;
+}
+
 function validateSessionHash(sessionTokenHash) {
   if (typeof sessionTokenHash !== "string" || !/^[a-f0-9]{64}$/.test(sessionTokenHash)) {
     throw new RangeError("sessionTokenHash must be a lowercase SHA-256 hash");
@@ -161,7 +241,26 @@ function normalizeSubmissionRow(row) {
     participantId: normalizeDatabaseId(row.participant_id, "participant id"),
     sentence: row.sentence,
     challengeId: row.challenge_id,
+    initialChallengePassed: row.initial_challenge_passed == null
+      ? null
+      : row.initial_challenge_passed === true,
+    challengePassed: row.challenge_passed == null ? null : row.challenge_passed === true,
+    challengeCompletedAt: row.challenge_completed_at == null
+      ? null
+      : normalizeTimestamp(row.challenge_completed_at),
+    scaleSubmittedAt: row.scale_submitted_at == null
+      ? null
+      : normalizeTimestamp(row.scale_submitted_at),
     createdAt: normalizeTimestamp(row.created_at),
+    wordPlacements: [],
+  };
+}
+
+function normalizePlacementRow(row) {
+  return {
+    tokenIndex: normalizeDatabaseId(row.token_index, "token index"),
+    tokenText: row.token_text,
+    rating: Number(row.rating),
   };
 }
 
@@ -183,6 +282,29 @@ async function initializeSchema(database) {
     );
     await client.query(CREATE_SUBMISSIONS_SQL);
     await client.query(ADD_PARTICIPANT_COLUMN_SQL);
+    await client.query(ADD_INITIAL_CHALLENGE_PASSED_COLUMN_SQL);
+    await client.query(ADD_CHALLENGE_PASSED_COLUMN_SQL);
+    await client.query(ADD_CHALLENGE_COMPLETED_COLUMN_SQL);
+    await client.query(ADD_SCALE_SUBMITTED_COLUMN_SQL);
+    // Preserve results if this app version briefly ran with only challenge_passed.
+    await client.query(
+      `
+        UPDATE sentence_submissions
+        SET initial_challenge_passed = challenge_passed
+        WHERE initial_challenge_passed IS NULL
+          AND challenge_passed IS NOT NULL
+          AND scale_submitted_at IS NOT NULL
+      `,
+    );
+    await client.query(
+      `
+        UPDATE sentence_submissions
+        SET challenge_completed_at = scale_submitted_at
+        WHERE challenge_completed_at IS NULL
+          AND challenge_passed = TRUE
+          AND scale_submitted_at IS NOT NULL
+      `,
+    );
     await client.query(
       "UPDATE sentence_submissions SET participant_id = 0 WHERE participant_id IS NULL",
     );
@@ -193,6 +315,7 @@ async function initializeSchema(database) {
     // cannot leave participant_id present without referential integrity.
     await client.query(DROP_PARTICIPANT_FOREIGN_KEY_SQL);
     await client.query(ADD_PARTICIPANT_FOREIGN_KEY_SQL);
+    await client.query(CREATE_VIBE_SCALE_PLACEMENTS_SQL);
     await client.query(
       `
         CREATE INDEX IF NOT EXISTS sentence_submissions_participant_created_idx
@@ -352,7 +475,16 @@ export async function createSentenceStore({ connectionString, pool } = {}) {
         `
           INSERT INTO sentence_submissions (participant_id, sentence, challenge_id)
           VALUES ($1, $2, $3)
-          RETURNING id, participant_id, sentence, challenge_id, created_at
+          RETURNING
+            id,
+            participant_id,
+            sentence,
+            challenge_id,
+            initial_challenge_passed,
+            challenge_passed,
+            challenge_completed_at,
+            scale_submitted_at,
+            created_at
         `,
         [normalizedParticipantId, normalizedSentence, normalizedChallengeId],
       );
@@ -363,11 +495,155 @@ export async function createSentenceStore({ connectionString, pool } = {}) {
       assertOpen();
       const result = await database.query(
         `
-          SELECT id, participant_id, sentence, challenge_id, created_at
+          SELECT
+            id,
+            participant_id,
+            sentence,
+            challenge_id,
+            initial_challenge_passed,
+            challenge_passed,
+            challenge_completed_at,
+            scale_submitted_at,
+            created_at
           FROM sentence_submissions
           WHERE id = $1
         `,
         [validatePositiveId(id)],
+      );
+      const submission = normalizeSubmissionRow(result.rows[0]);
+      if (!submission) return null;
+
+      const placementResult = await database.query(
+        `
+          SELECT token_index, token_text, rating
+          FROM vibe_scale_placements
+          WHERE submission_id = $1
+          ORDER BY token_index
+        `,
+        [submission.id],
+      );
+      submission.wordPlacements = placementResult.rows.map(normalizePlacementRow);
+      return submission;
+    },
+
+    async saveScaleResult({
+      submissionId,
+      participantId,
+      placements,
+      challengePassed,
+    } = {}) {
+      assertOpen();
+      const normalizedSubmissionId = validatePositiveId(submissionId, "submissionId");
+      const normalizedParticipantId = validatePositiveId(participantId, "participantId");
+      const normalizedPlacements = normalizeScalePlacements(placements);
+      const normalizedPassed = validateChallengePassed(challengePassed);
+      const client = await database.connect();
+
+      try {
+        await client.query("BEGIN");
+        const updated = await client.query(
+          `
+            UPDATE sentence_submissions
+            SET initial_challenge_passed = COALESCE(initial_challenge_passed, $3),
+                challenge_passed = COALESCE(challenge_passed, FALSE) OR $3,
+                challenge_completed_at = CASE
+                  WHEN challenge_completed_at IS NOT NULL THEN challenge_completed_at
+                  WHEN $3 THEN CURRENT_TIMESTAMP::TIMESTAMPTZ
+                  ELSE NULL
+                END,
+                scale_submitted_at = COALESCE(
+                  scale_submitted_at,
+                  CURRENT_TIMESTAMP::TIMESTAMPTZ
+                )
+            WHERE id = $1 AND participant_id = $2
+            RETURNING
+              id,
+              participant_id,
+              sentence,
+              challenge_id,
+              initial_challenge_passed,
+              challenge_passed,
+              challenge_completed_at,
+              scale_submitted_at,
+              created_at
+          `,
+          [normalizedSubmissionId, normalizedParticipantId, normalizedPassed],
+        );
+
+        if (updated.rows.length === 0) {
+          await client.query("ROLLBACK");
+          return null;
+        }
+
+        await client.query(
+          "DELETE FROM vibe_scale_placements WHERE submission_id = $1",
+          [normalizedSubmissionId],
+        );
+
+        const values = [];
+        const placeholders = normalizedPlacements.map((placement, index) => {
+          const offset = index * 4;
+          values.push(
+            normalizedSubmissionId,
+            placement.tokenIndex,
+            placement.tokenText,
+            placement.rating,
+          );
+          return `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4})`;
+        });
+        await client.query(
+          `
+            INSERT INTO vibe_scale_placements (
+              submission_id,
+              token_index,
+              token_text,
+              rating
+            )
+            VALUES ${placeholders.join(", ")}
+          `,
+          values,
+        );
+        await client.query("COMMIT");
+
+        return {
+          ...normalizeSubmissionRow(updated.rows[0]),
+          wordPlacements: normalizedPlacements,
+        };
+      } catch (error) {
+        await client.query("ROLLBACK").catch(() => {});
+        throw error;
+      } finally {
+        client.release();
+      }
+    },
+
+    async completeChallenge({ submissionId, participantId } = {}) {
+      assertOpen();
+      const normalizedSubmissionId = validatePositiveId(submissionId, "submissionId");
+      const normalizedParticipantId = validatePositiveId(participantId, "participantId");
+      const result = await database.query(
+        `
+          UPDATE sentence_submissions
+          SET challenge_passed = TRUE,
+              challenge_completed_at = COALESCE(
+                challenge_completed_at,
+                CURRENT_TIMESTAMP::TIMESTAMPTZ
+              )
+          WHERE id = $1
+            AND participant_id = $2
+            AND initial_challenge_passed IS NOT NULL
+          RETURNING
+            id,
+            participant_id,
+            sentence,
+            challenge_id,
+            initial_challenge_passed,
+            challenge_passed,
+            challenge_completed_at,
+            scale_submitted_at,
+            created_at
+        `,
+        [normalizedSubmissionId, normalizedParticipantId],
       );
       return normalizeSubmissionRow(result.rows[0]);
     },

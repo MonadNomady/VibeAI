@@ -8,7 +8,13 @@ import {
   createSentenceStore,
   databaseUrlFromEnvironment,
   normalizeDisplayName,
+  normalizeSentence,
 } from "./storage.mjs";
+import {
+  analyzeSentiment,
+  didPassChallenge,
+  tokenizeSentence,
+} from "./sentiment.js";
 
 const DEFAULT_PORT = 4173;
 const MAX_BODY_BYTES = 4_096;
@@ -184,6 +190,22 @@ async function readJsonBody(request) {
   return body;
 }
 
+function normalizeRatings(ratings, expectedCount) {
+  if (!Array.isArray(ratings)) {
+    throw new TypeError("ratings must be an array");
+  }
+  if (ratings.length !== expectedCount) {
+    throw new RangeError("ratings must include exactly one value for each displayed token");
+  }
+
+  return ratings.map((rating) => {
+    if (!Number.isInteger(rating) || ![-1, 0, 1].includes(rating)) {
+      throw new RangeError("each rating must be -1, 0, or 1");
+    }
+    return rating;
+  });
+}
+
 async function handleSessionApi(request, response, store) {
   if (request.method === "DELETE") {
     const token = cookieValue(request, SESSION_COOKIE_NAME);
@@ -298,6 +320,146 @@ async function handleSentenceApi(request, response, store) {
   }
 }
 
+async function handleScaleResultApi(request, response, store, submissionId) {
+  if (request.method !== "PUT") {
+    writeJson(response, 405, { error: "Method not allowed." }, { Allow: "PUT" });
+    return;
+  }
+
+  try {
+    const session = await participantSession(request, store);
+    if (!session.participant) {
+      const headers = session.shouldClear
+        ? { "Set-Cookie": sessionCookie(request, "", { clear: true }) }
+        : {};
+      writeJson(
+        response,
+        401,
+        { error: "Enter your classroom name before saving vibe-scale choices." },
+        headers,
+      );
+      return;
+    }
+
+    const submission = await store.getById(submissionId);
+    if (!submission || submission.participantId !== session.participant.id) {
+      writeJson(response, 404, { error: "Sentence submission not found." });
+      return;
+    }
+
+    const body = await readJsonBody(request);
+    const tokens = tokenizeSentence(submission.sentence);
+    const ratings = normalizeRatings(body.ratings, tokens.length);
+    const analysis = analyzeSentiment(submission.sentence);
+    const challengePassed = didPassChallenge(submission.challengeId, analysis.score);
+    const saved = await store.saveScaleResult({
+      submissionId,
+      participantId: session.participant.id,
+      challengePassed,
+      placements: tokens.map((token, tokenIndex) => ({
+        tokenIndex,
+        tokenText: token.text,
+        rating: ratings[tokenIndex],
+      })),
+    });
+
+    if (!saved) {
+      writeJson(response, 404, { error: "Sentence submission not found." });
+      return;
+    }
+
+    writeJson(response, 200, {
+      initialChallengePassed: saved.initialChallengePassed,
+      challengePassed: saved.challengePassed,
+      scaleSubmittedAt: saved.scaleSubmittedAt,
+    });
+  } catch (error) {
+    if (error instanceof RequestError) {
+      writeJson(response, error.status, { error: error.message });
+      return;
+    }
+    if (error instanceof TypeError || error instanceof RangeError) {
+      writeJson(response, 400, { error: error.message });
+      return;
+    }
+    console.error("Failed to save vibe-scale choices:", error);
+    writeJson(response, 500, { error: "The vibe-scale choices could not be saved." });
+  }
+}
+
+async function handleChallengeCompletionApi(request, response, store, submissionId) {
+  if (request.method !== "PUT") {
+    writeJson(response, 405, { error: "Method not allowed." }, { Allow: "PUT" });
+    return;
+  }
+
+  try {
+    const session = await participantSession(request, store);
+    if (!session.participant) {
+      const headers = session.shouldClear
+        ? { "Set-Cookie": sessionCookie(request, "", { clear: true }) }
+        : {};
+      writeJson(
+        response,
+        401,
+        { error: "Enter your classroom name before completing a challenge." },
+        headers,
+      );
+      return;
+    }
+
+    const submission = await store.getById(submissionId);
+    if (!submission || submission.participantId !== session.participant.id) {
+      writeJson(response, 404, { error: "Sentence submission not found." });
+      return;
+    }
+    if (submission.initialChallengePassed == null) {
+      writeJson(response, 409, { error: "Save the vibe-scale choices before completing the challenge." });
+      return;
+    }
+
+    const body = await readJsonBody(request);
+    const tweakedSentence = normalizeSentence(body.sentence);
+    const analysis = analyzeSentiment(tweakedSentence);
+    const attemptPassed = didPassChallenge(submission.challengeId, analysis.score);
+
+    if (!attemptPassed) {
+      writeJson(response, 200, {
+        attemptPassed: false,
+        challengePassed: submission.challengePassed === true,
+        challengeCompletedAt: submission.challengeCompletedAt,
+      });
+      return;
+    }
+
+    const saved = await store.completeChallenge({
+      submissionId,
+      participantId: session.participant.id,
+    });
+    if (!saved) {
+      writeJson(response, 409, { error: "Save the vibe-scale choices before completing the challenge." });
+      return;
+    }
+
+    writeJson(response, 200, {
+      attemptPassed: true,
+      challengePassed: true,
+      challengeCompletedAt: saved.challengeCompletedAt,
+    });
+  } catch (error) {
+    if (error instanceof RequestError) {
+      writeJson(response, error.status, { error: error.message });
+      return;
+    }
+    if (error instanceof TypeError || error instanceof RangeError) {
+      writeJson(response, 400, { error: error.message });
+      return;
+    }
+    console.error("Failed to complete challenge:", error);
+    writeJson(response, 500, { error: "The challenge result could not be saved." });
+  }
+}
+
 async function servePublicFile(request, response, pathname, rootDirectory) {
   const relativePath = publicFiles.get(pathname);
   if (!relativePath || !["GET", "HEAD"].includes(request.method)) {
@@ -334,6 +496,9 @@ export function createVibeCheckServer({ rootDirectory = defaultRoot, store } = {
     || typeof store.getParticipantBySessionHash !== "function"
     || typeof store.revokeParticipantSession !== "function"
     || typeof store.saveSentence !== "function"
+    || typeof store.getById !== "function"
+    || typeof store.saveScaleResult !== "function"
+    || typeof store.completeChallenge !== "function"
     || typeof store.close !== "function"
   ) {
     throw new TypeError(
@@ -359,6 +524,30 @@ export function createVibeCheckServer({ rootDirectory = defaultRoot, store } = {
 
       if (pathname === "/api/participants") {
         await handleParticipantApi(request, response, store);
+        return;
+      }
+
+      const scaleResultMatch = pathname.match(
+        /^\/api\/sentences\/([1-9]\d*)\/scale-result$/,
+      );
+      if (scaleResultMatch) {
+        const submissionId = Number(scaleResultMatch[1]);
+        if (!Number.isSafeInteger(submissionId)) {
+          throw new RequestError(400, "Submission ID must be a positive integer.");
+        }
+        await handleScaleResultApi(request, response, store, submissionId);
+        return;
+      }
+
+      const challengeCompletionMatch = pathname.match(
+        /^\/api\/sentences\/([1-9]\d*)\/challenge-completion$/,
+      );
+      if (challengeCompletionMatch) {
+        const submissionId = Number(challengeCompletionMatch[1]);
+        if (!Number.isSafeInteger(submissionId)) {
+          throw new RequestError(400, "Submission ID must be a positive integer.");
+        }
+        await handleChallengeCompletionApi(request, response, store, submissionId);
         return;
       }
 

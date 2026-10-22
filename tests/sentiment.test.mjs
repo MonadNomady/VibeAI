@@ -1,6 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { analyzeSentiment, tokenizeSentence } from '../sentiment.js';
+import {
+  analyzeSentiment,
+  didPassChallenge,
+  tokenizeSentence,
+} from '../sentiment.js';
 
 test('tokenization preserves contractions, punctuation, and emoji for display', () => {
   const tokens = tokenizeSentence("Wow, I can't believe this 😊!!!");
@@ -32,6 +36,18 @@ test('positive and negative language produce bounded, explainable results', () =
     assert(result.tokens.every((token) => token.weight >= -1 && token.weight <= 1));
     assert(result.tokens.every((token) => typeof token.reason === 'string' && token.reason.length > 0));
   }
+});
+
+test('challenge pass rules are shared and preserve their score boundaries', () => {
+  assert.equal(didPassChallenge('clear-vibe', 0.35), true);
+  assert.equal(didPassChallenge('clear-vibe', -0.35), true);
+  assert.equal(didPassChallenge('clear-vibe', 0.349), false);
+  assert.equal(didPassChallenge('sarcasm', 0.151), true);
+  assert.equal(didPassChallenge('sarcasm', 0.15), false);
+  assert.equal(didPassChallenge('mixed', 0.249), true);
+  assert.equal(didPassChallenge('mixed', -0.25), false);
+  assert.equal(didPassChallenge('unknown', 0), false);
+  assert.equal(didPassChallenge('mixed', Number.NaN), false);
 });
 
 test('expanded classroom and social vocabulary is recognized', () => {

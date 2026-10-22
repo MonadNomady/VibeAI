@@ -15,6 +15,27 @@ Then open <http://localhost:4173>. Node.js 22.13 or newer and a PostgreSQL datab
 
 On a first visit, the app asks for a first name, nickname, or teacher-provided class code. PostgreSQL stores that classroom label in `participants`. Each row in `sentence_submissions` has a required `participant_id` foreign key, so submitted sentences can be joined back to the participant who entered them.
 
+When a learner selects **Lock in and reveal results**, the app also stores the final vibe-scale map. `vibe_scale_placements` contains one ordered row per displayed word, emoji, or punctuation token: `-1` means negative, `0` neutral, and `1` positive. The matching `sentence_submissions` row records the first reveal in `initial_challenge_passed` and `scale_submitted_at`. `challenge_passed` records whether the learner ultimately completed the challenge, including a later successful Tweak Lab step, and `challenge_completed_at` records when that happened. The server derives token text and both challenge results instead of trusting those values from the browser. Historical submissions remain valid with null challenge results and no placement rows.
+
+For example, this query shows the collected classroom results and word placements:
+
+```sql
+SELECT
+  p.display_name,
+  s.sentence,
+  s.challenge_id,
+  s.initial_challenge_passed,
+  s.challenge_passed,
+  s.challenge_completed_at,
+  v.token_index,
+  v.token_text,
+  v.rating
+FROM sentence_submissions AS s
+JOIN participants AS p ON p.id = s.participant_id
+LEFT JOIN vibe_scale_placements AS v ON v.submission_id = s.id
+ORDER BY s.created_at DESC, v.token_index;
+```
+
 The browser receives a 30-day, HttpOnly `vibecheck_session` cookie. The database stores only its SHA-256 hash, not the raw session token, and the sentence API derives the participant from that cookie instead of trusting a participant ID from the page. **Switch user** expires that server-side session and clears the browser cookie, while deliberately keeping earlier participant and submission records.
 
 The schema and migration run automatically at startup. Submissions that existed before participant tracking are preserved and linked to the reserved participant **Before names were collected**. The former local SQLite database is no longer used, and existing SQLite rows are not copied automatically.

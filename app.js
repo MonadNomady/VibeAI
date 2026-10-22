@@ -1,4 +1,8 @@
-import { analyzeSentiment, tokenizeSentence } from "./sentiment.js";
+import {
+  analyzeSentiment,
+  didPassChallenge,
+  tokenizeSentence,
+} from "./sentiment.js";
 import {
   EMOTION_LABELS,
   buildRadarGeometry,
@@ -34,18 +38,6 @@ const EMOTION_HAMPTER_IMAGES = Object.freeze({
 
 const challenges = [
   {
-    id: "sarcasm",
-    difficulty: "Intermediate challenge",
-    prompt: "Write a sarcastic message whose positive words hide a negative feeling.",
-    helper: "Can the model notice that the literal words and the real vibe disagree?",
-    examples: [
-      "Oh wow, thanks SO much for making me wait an hour :/",
-      "Sure, I totally love doing homework all weekend.",
-      "What a wonderful surprise—another pop quiz.",
-      "Perfect, my laptop crashed right before the deadline.",
-    ],
-  },
-  {
     id: "clear-vibe",
     difficulty: "Warm-up challenge",
     prompt: "Write a message with one clear emotional vibe: positive or negative.",
@@ -55,6 +47,18 @@ const challenges = [
       "I am frustrated that our plans fell apart.",
       "Today has been calm, sunny, and lovely.",
       "This broken app is making me miserable.",
+    ],
+  },
+  {
+    id: "sarcasm",
+    difficulty: "Intermediate challenge",
+    prompt: "Write a sarcastic message whose positive words hide a negative feeling.",
+    helper: "Can the model notice that the literal words and the real vibe disagree?",
+    examples: [
+      "Oh wow, thanks SO much for making me wait an hour :/",
+      "Sure, I totally love doing homework all weekend.",
+      "What a wonderful surprise—another pop quiz.",
+      "Perfect, my laptop crashed right before the deadline.",
     ],
   },
   {
@@ -84,14 +88,17 @@ const initialState = () => ({
   challengeIndex: 0,
   sentence: "",
   savedSubmissionKey: null,
+  submissionId: null,
   tokens: [],
   userRatings: {},
   userConfidence: 70,
   analysis: null,
+  initialChallengePassed: null,
   emotionResult: initialEmotionResult(),
   selectedTokenIndex: 0,
   tweakedSentence: "",
   tweakedAnalysis: null,
+  challengeCompletionSaved: false,
 });
 
 let state = initialState();
@@ -206,6 +213,34 @@ async function saveSentenceInput(sentence, challengeId) {
   return response.json();
 }
 
+async function saveScaleResult(submissionId, ratings) {
+  const response = await fetch(`/api/sentences/${submissionId}/scale-result`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ratings }),
+  });
+
+  if (!response.ok) {
+    throw await apiError(response, "The vibe-scale choices could not be saved.");
+  }
+
+  return response.json();
+}
+
+async function saveChallengeCompletion(submissionId, sentence) {
+  const response = await fetch(`/api/sentences/${submissionId}/challenge-completion`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ sentence }),
+  });
+
+  if (!response.ok) {
+    throw await apiError(response, "The challenge result could not be saved.");
+  }
+
+  return response.json();
+}
+
 function updateProgress() {
   const order = ["input", "scale", "results", "tweak"];
   const currentIndex = order.indexOf(state.screen);
@@ -298,7 +333,7 @@ function renderParticipantGate() {
                 required
               />
               <p class="participant-help" id="participant-help">Use 40 characters or fewer for your first name, a nickname, or the class code your teacher gave you. Don’t enter your full name or other private information.</p>
-              <p class="participant-storage" id="participant-storage">We’ll save this classroom name with the sentences you submit so your teacher can tell whose experiment it was.</p>
+              <p class="participant-storage" id="participant-storage">We’ll save this classroom name with the sentences you submit, your vibe-scale choices, and whether each challenge was passed.</p>
               <p class="field-error" id="participant-error" role="alert">${escapeHtml(participantSession.message)}</p>
               <button class="gradient-button full-width" id="participant-submit" type="submit" ${draftName.trim() && !isSaving ? "" : "disabled"}>
                 ${isSaving ? "Saving your name…" : "Start the activity"}
@@ -419,7 +454,7 @@ function renderInput() {
           <span class="challenge-label">Active challenge</span>
           <p class="challenge-prompt">${escapeHtml(challenge.prompt)}</p>
         </article>
-        <button class="round-button" id="next-challenge" type="button" aria-label="Next challenge"></button>
+        <button class="round-button" id="next-challenge" type="button" aria-label="Next challenge">→</button>
       </div>
 
       <div class="challenge-dots" role="group" aria-label="Challenge choices">
@@ -451,7 +486,7 @@ function renderInput() {
             >${escapeHtml(state.sentence)}</textarea>
             <span class="character-count"><span id="character-count">${state.sentence.length}</span>/240</span>
           </div>
-          <p class="storage-note" id="storage-note">This sentence will be saved with the classroom name <strong>${escapeHtml(participantSession.participant.displayName)}</strong>. Don’t include anyone’s full name, address, username, or other private information.</p>
+          <p class="storage-note" id="storage-note">This sentence, your vibe-scale choices, and the challenge result will be saved with the classroom name <strong>${escapeHtml(participantSession.participant.displayName)}</strong>. Don’t include anyone’s full name, address, username, or other private information.</p>
           <p class="field-error" id="input-error" aria-live="polite"></p>
           <p id="challenge-helper" class="starter-label">${escapeHtml(challenge.helper)}</p>
           <ul class="starter-list" aria-label="Sentence starters">
@@ -536,7 +571,10 @@ function renderInput() {
     const challengeId = challenge.id;
     const submissionKey = `${participantSession.participant.id}\u0000${challengeId}\u0000${sentence}`;
 
-    if (state.savedSubmissionKey !== submissionKey) {
+    if (
+      state.savedSubmissionKey !== submissionKey
+      || !Number.isSafeInteger(state.submissionId)
+    ) {
       const controls = [...app.querySelectorAll("button, textarea")];
       form.setAttribute("aria-busy", "true");
       controls.forEach((control) => { control.disabled = true; });
@@ -544,8 +582,12 @@ function renderInput() {
       error.textContent = "";
 
       try {
-        await saveSentenceInput(sentence, challengeId);
+        const saved = await saveSentenceInput(sentence, challengeId);
+        if (!Number.isSafeInteger(saved?.id) || saved.id < 1) {
+          throw new Error("The server returned an invalid sentence submission ID.");
+        }
         state.savedSubmissionKey = submissionKey;
+        state.submissionId = saved.id;
       } catch (saveError) {
         if (saveError.status === 401) {
           const challengeIndex = state.challengeIndex;
@@ -576,6 +618,7 @@ function renderInput() {
     state.tokens = tokens;
     state.userRatings = Object.fromEntries(tokens.map((token) => [token.id, 0]));
     state.analysis = null;
+    state.initialChallengePassed = null;
     resetEmotionAnalysis();
     navigate("scale");
     showToast("Message saved to the class database.");
@@ -692,7 +735,8 @@ function renderScale(options = {}) {
         </div>
       </div>
 
-      <button class="gradient-button full-width" id="reveal-results" type="button">Lock in and reveal results</button>
+      <button class="gradient-button full-width" id="reveal-results" type="button" aria-describedby="scale-save-error">Lock in and reveal results</button>
+      <p class="field-error" id="scale-save-error" role="alert"></p>
     </section>
   `;
 
@@ -738,9 +782,59 @@ function renderScale(options = {}) {
     });
   });
 
-  app.querySelector("#reveal-results").addEventListener("click", () => {
-    state.analysis = analyzeSentiment(state.sentence);
-    navigate("results");
+  app.querySelector("#reveal-results").addEventListener("click", async () => {
+    const revealButton = app.querySelector("#reveal-results");
+    const saveError = app.querySelector("#scale-save-error");
+    const screen = app.querySelector(".screen");
+
+    if (!Number.isSafeInteger(state.submissionId) || state.submissionId < 1) {
+      saveError.textContent = "Return to the message page and save this sentence before revealing results.";
+      return;
+    }
+
+    const analysis = analyzeSentiment(state.sentence);
+    const ratings = state.tokens.map((token) => Number(state.userRatings[token.id] ?? 0));
+    const controls = [...app.querySelectorAll("button, input")].map((control) => ({
+      control,
+      wasDisabled: control.disabled,
+    }));
+    controls.forEach(({ control }) => { control.disabled = true; });
+    screen.setAttribute("aria-busy", "true");
+    revealButton.textContent = "Saving choices…";
+    saveError.textContent = "";
+
+    try {
+      const saved = await saveScaleResult(state.submissionId, ratings);
+      if (typeof saved?.initialChallengePassed !== "boolean") {
+        throw new Error("The server returned an invalid challenge result.");
+      }
+      state.analysis = analysis;
+      state.initialChallengePassed = saved.initialChallengePassed;
+      navigate("results");
+      showToast("Vibe-scale choices saved to the class database.");
+    } catch (error) {
+      if (error.status === 401) {
+        const challengeIndex = state.challengeIndex;
+        cancelEmotionAnalysis();
+        state = initialState();
+        state.challengeIndex = challengeIndex;
+        participantSession = {
+          status: "required",
+          participant: null,
+          draftName: "",
+          message: "Your classroom session ended. Enter your classroom name again.",
+        };
+        render();
+        focusScreenHeading();
+        return;
+      }
+
+      screen.removeAttribute("aria-busy");
+      controls.forEach(({ control, wasDisabled }) => { control.disabled = wasDisabled; });
+      revealButton.textContent = "Lock in and reveal results";
+      saveError.textContent = "We couldn’t save your vibe-scale choices. Check the server and try again.";
+      revealButton.focus();
+    }
   });
 
   if (options.focusTokenId) {
@@ -808,7 +902,7 @@ function challengeFeedback(label, score) {
     return "This model only follows visible word and emoji weights. It cannot know whether you meant the message sarcastically.";
   }
   if (challenge.id === "mixed") {
-    if (normalizedLabel.includes("mixed") || Math.abs(score) < 0.18) return "The model noticed competing emotional clues—challenge complete.";
+    if (normalizedLabel.includes("mixed") || didPassChallenge("mixed", score)) return "The model noticed competing emotional clues—challenge complete.";
     return `The ${score > 0 ? "positive" : "negative"} clues dominated this sentence, so its mixed vibe was less visible.`;
   }
   const expected = score > 0.08 ? "positive" : score < -0.08 ? "negative" : "neutral";
@@ -1040,19 +1134,6 @@ async function startEmotionAnalysis({ force = false } = {}) {
   }
 }
 
-function checkChallengeSuccess(challengeId, score, analysis) {
-  if (challengeId === "sarcasm") {
-    return score > 0.15;
-  }
-  if (challengeId === "clear-vibe") {
-    return Math.abs(score) >= 0.35;
-  }
-  if (challengeId === "mixed") {
-    return Math.abs(score) < 0.25;
-  }
-  return false;
-}
-
 function renderResults() {
   const analysis = state.analysis ?? analyzeSentiment(state.sentence);
   state.analysis = analysis;
@@ -1068,7 +1149,9 @@ function renderResults() {
   const emotionColors = ["#e4b73c", "#f05e58", "#6b9fd3", "#9a7bc4", "#61c976", "#e781a0", "#d3794a"];
   const nonZeroTokens = tokens.filter((token) => Math.abs(tokenWeight(token)) > 0.005);
   const summary = analysis.summary || `The model combined ${nonZeroTokens.length} emotional clue${nonZeroTokens.length === 1 ? "" : "s"} to place this message on the sentiment scale.`;
-  const passed = checkChallengeSuccess(challenges[state.challengeIndex].id, score, analysis);
+  const passed = typeof state.initialChallengePassed === "boolean"
+    ? state.initialChallengePassed
+    : didPassChallenge(challenges[state.challengeIndex].id, score);
   document.title = "VibeCheck — AI results";
 
   app.innerHTML = `
@@ -1213,6 +1296,7 @@ function renderResults() {
     state.tweakedSentence = state.sentence;
     state.tweakedAnalysis = analyzeSentiment(state.sentence);
     state.selectedTokenIndex = 0;
+    state.challengeCompletionSaved = false;
     navigate("tweak");
   });
 
@@ -1231,7 +1315,7 @@ function renderTweak() {
   const tweakedAnalysis = state.tweakedAnalysis ?? analyzeSentiment(state.tweakedSentence);
   const tweakedScore = tweakedAnalysis.score;
   const tweakedLabel = titleCase(tweakedAnalysis.label);
-  const isComplete = checkChallengeSuccess(challenge.id, tweakedScore, tweakedAnalysis);
+  const isComplete = didPassChallenge(challenge.id, tweakedScore);
 
   app.innerHTML = `
     <section class="screen" aria-labelledby="tweak-title">
@@ -1267,10 +1351,13 @@ function renderTweak() {
             class="name-input" 
             placeholder="Type your replacement word..." 
             autocomplete="off" 
+            maxlength="240"
+            aria-describedby="tweak-input-error"
             required 
           />
           <button type="submit" class="apply-button">Apply</button>
         </form>
+        <p class="field-error" id="tweak-input-error" role="alert"></p>
 
         <!-- Before and After Comparison -->
         <div class="tweak-comparison">
@@ -1305,11 +1392,14 @@ function renderTweak() {
 
       <!-- Bottom Next / Try Again Action -->
       <div class="paper-card completion-banner">
-        <p class="eyebrow" style="justify-content: center;">🎉 Challenge Complete!</p>
-        <p class="banner-subtext">You engineered your sentence successfully and discovered how the AI model computes sentiment shifts.</p>
-        <button class="gradient-button full-width" id="finish-challenge" type="button" ${isComplete ? "" : "disabled"}>
+        <p class="eyebrow" style="justify-content: center;">${isComplete ? "🎉 Challenge Complete!" : "Keep experimenting"}</p>
+        <p class="banner-subtext">${isComplete
+          ? "You engineered your sentence successfully and discovered how the AI model computes sentiment shifts."
+          : "Try another replacement and watch for the score to cross the challenge target."}</p>
+        <button class="gradient-button full-width" id="finish-challenge" type="button" ${isComplete && state.challengeCompletionSaved ? "" : "disabled"}>
           Next Challenge
         </button>
+        <p class="field-error" id="tweak-completion-error" role="alert"></p>
         <button class="text-button" id="tweak-retry" type="button" style="margin: 12px auto 0; display: block;">
           Try Another Message
         </button>
@@ -1330,22 +1420,90 @@ function renderTweak() {
 
   const form = app.querySelector("#tweak-form");
   const input = app.querySelector("#token-replacement");
-  form.addEventListener("submit", (e) => {
+  const inputError = app.querySelector("#tweak-input-error");
+  form.addEventListener("submit", async (e) => {
     e.preventDefault();
     const replacement = input.value.trim();
     if (!replacement) return;
 
     const words = currentTokens.map((t) => t.text);
     words[state.selectedTokenIndex] = replacement;
-    state.tweakedSentence = words.join(" ");
-    state.tweakedAnalysis = analyzeSentiment(state.tweakedSentence);
+    const nextSentence = words.join(" ").trim();
+    if ([...nextSentence].length > 240) {
+      inputError.textContent = "Keep the updated sentence to 240 characters or fewer.";
+      input.focus();
+      return;
+    }
+
+    const nextAnalysis = analyzeSentiment(nextSentence);
+    const nextPasses = didPassChallenge(challenge.id, nextAnalysis.score);
+    if (nextPasses && !state.challengeCompletionSaved) {
+      if (!Number.isSafeInteger(state.submissionId) || state.submissionId < 1) {
+        inputError.textContent = "Return to the message page and save this sentence before finishing.";
+        return;
+      }
+
+      const applyButton = form.querySelector(".apply-button");
+      const controls = [...app.querySelectorAll("button, input")].map((control) => ({
+        control,
+        wasDisabled: control.disabled,
+      }));
+      controls.forEach(({ control }) => { control.disabled = true; });
+      form.setAttribute("aria-busy", "true");
+      applyButton.textContent = "Saving…";
+      inputError.textContent = "";
+
+      try {
+        const saved = await saveChallengeCompletion(state.submissionId, nextSentence);
+        if (saved?.attemptPassed !== true || saved?.challengePassed !== true) {
+          throw new Error("The server did not confirm that this challenge was passed.");
+        }
+        state.challengeCompletionSaved = true;
+      } catch (saveError) {
+        if (saveError.status === 401) {
+          const challengeIndex = state.challengeIndex;
+          cancelEmotionAnalysis();
+          state = initialState();
+          state.challengeIndex = challengeIndex;
+          participantSession = {
+            status: "required",
+            participant: null,
+            draftName: "",
+            message: "Your classroom session ended. Enter your classroom name again.",
+          };
+          render();
+          focusScreenHeading();
+          return;
+        }
+
+        form.removeAttribute("aria-busy");
+        controls.forEach(({ control, wasDisabled }) => { control.disabled = wasDisabled; });
+        applyButton.textContent = "Apply";
+        inputError.textContent = saveError.message || "We couldn’t save the completed challenge. Check the server and try again.";
+        input.focus();
+        return;
+      }
+    }
+
+    state.tweakedSentence = nextSentence;
+    state.tweakedAnalysis = nextAnalysis;
     renderTweak();
+    if (nextPasses && state.challengeCompletionSaved) {
+      showToast("Challenge completion saved to the class database.");
+    }
   });
 
   app.querySelector("#finish-challenge").addEventListener("click", () => {
-    state.challengeIndex = (state.challengeIndex + 1) % challenges.length;
+    const error = app.querySelector("#tweak-completion-error");
+
+    if (!state.challengeCompletionSaved) {
+      error.textContent = "Save a passing replacement before moving to the next challenge.";
+      return;
+    }
+
+    const nextChallengeIndex = (state.challengeIndex + 1) % challenges.length;
     cancelEmotionAnalysis();
-    state = { ...initialState(), challengeIndex: state.challengeIndex };
+    state = { ...initialState(), challengeIndex: nextChallengeIndex };
     navigate("input");
   });
 
