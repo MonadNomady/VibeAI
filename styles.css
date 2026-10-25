@@ -1319,7 +1319,18 @@ input[type="range"] {
 }
 
 .weights-details .weights-list {
+  max-height: 210px;
   margin-top: 12px;
+  padding-right: 6px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.weights-details .weights-list:focus-visible {
+  border-radius: 9px;
+  outline: 3px solid rgba(61, 126, 190, 0.42);
+  outline-offset: 3px;
 }
 
 .calculation-box {

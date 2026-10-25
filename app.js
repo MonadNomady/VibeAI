@@ -434,6 +434,14 @@ async function switchParticipant(button) {
   }
 }
 
+// The participant strip is recreated whenever the app changes screens, so use
+// one delegated listener that continues to work for every rendered instance.
+app.addEventListener("click", (event) => {
+  const button = event.target.closest?.("[data-switch-participant]");
+  if (!button || !app.contains(button)) return;
+  void switchParticipant(button);
+});
+
 function renderInput() {
   const challenge = challenges[state.challengeIndex];
   const isReady = state.sentence.trim().length > 0;
@@ -1206,7 +1214,7 @@ function renderResults() {
         <p class="weights-intro">Each token starts with a dictionary score. Context—like negation, emphasis, or contrast—can change its final weight.</p>
         <details class="weights-details" ${window.matchMedia("(min-width: 561px)").matches ? "open" : ""}>
           <summary><span>Token-by-token explanations</span><span>${tokens.length} tokens</span></summary>
-          <div class="weights-list" role="list" aria-label="Individual token sentiment weights">
+          <div class="weights-list" role="list" tabindex="0" aria-label="Scrollable individual token sentiment weights">
             ${tokens
       .map((token) => {
         const weight = tokenWeight(token);
