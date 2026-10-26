@@ -15,7 +15,9 @@ Then open <http://localhost:4173>. Node.js 22.13 or newer and a PostgreSQL datab
 
 On a first visit, the app asks for a first name, nickname, or teacher-provided class code. PostgreSQL stores that classroom label in `participants`. Each row in `sentence_submissions` has a required `participant_id` foreign key, so submitted sentences can be joined back to the participant who entered them.
 
-When a learner selects **Lock in and reveal results**, the app also stores the final vibe-scale map. `vibe_scale_placements` contains one ordered row per displayed word, emoji, or punctuation token: `-1` means negative, `0` neutral, and `1` positive. The matching `sentence_submissions` row records the first reveal in `initial_challenge_passed` and `scale_submitted_at`. `challenge_passed` records whether the learner ultimately completed the challenge, including a later successful Tweak Lab step, and `challenge_completed_at` records when that happened. The server derives token text and both challenge results instead of trusting those values from the browser. Historical submissions remain valid with null challenge results and no placement rows.
+When a learner selects **Lock in and reveal results**, the app also stores the latest vibe-scale map and confidence percentage selected under **Your call**. `vibe_scale_placements` contains one ordered row per displayed word, emoji, or punctuation token: `-1` means negative, `0` neutral, and `1` positive. The matching `sentence_submissions` row stores the latest saved percentage in `vibe_confidence_percent`, the first reveal in `initial_challenge_passed`, and the first save time in `scale_submitted_at`.
+
+Every **Apply** in Tweak Lab creates an ordered row in `tweak_attempts`. It records the selected token and replacement, the sentence before and after the change, both sentiment scores, whether that particular change passed the challenge, and when it happened. `sentence_submissions.challenge_passed` records whether the learner ultimately completed the challenge, while `challenge_completed_at` records the first completion time. The server reconstructs each change and derives its token text, sentences, scores, and pass result instead of trusting those values from the browser. Historical submissions remain valid with null collection fields and no related placement or tweak rows.
 
 For example, this query shows the collected classroom results and word placements:
 
@@ -24,6 +26,7 @@ SELECT
   p.display_name,
   s.sentence,
   s.challenge_id,
+  s.vibe_confidence_percent,
   s.initial_challenge_passed,
   s.challenge_passed,
   s.challenge_completed_at,
@@ -34,6 +37,29 @@ FROM sentence_submissions AS s
 JOIN participants AS p ON p.id = s.participant_id
 LEFT JOIN vibe_scale_placements AS v ON v.submission_id = s.id
 ORDER BY s.created_at DESC, v.token_index;
+```
+
+This query shows the complete Tweak Lab history in the order each learner applied changes:
+
+```sql
+SELECT
+  p.display_name,
+  s.sentence AS original_sentence,
+  s.challenge_id,
+  t.attempt_index,
+  t.token_index,
+  t.original_token,
+  t.replacement_text,
+  t.before_sentence,
+  t.after_sentence,
+  t.before_score,
+  t.after_score,
+  t.challenge_passed,
+  t.created_at
+FROM tweak_attempts AS t
+JOIN sentence_submissions AS s ON s.id = t.submission_id
+JOIN participants AS p ON p.id = s.participant_id
+ORDER BY s.created_at DESC, t.attempt_index;
 ```
 
 The browser receives a 30-day, HttpOnly `vibecheck_session` cookie. The database stores only its SHA-256 hash, not the raw session token, and the sentence API derives the participant from that cookie instead of trusting a participant ID from the page. **Switch user** expires that server-side session and clears the browser cookie, while deliberately keeping earlier participant and submission records.

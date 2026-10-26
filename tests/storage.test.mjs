@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { newDb } from "pg-mem";
 import {
+  TweakSequenceConflictError,
   createSentenceStore,
   databaseUrlFromEnvironment,
 } from "../storage.mjs";
@@ -178,6 +179,7 @@ test("saveSentence records its participant, trims input, and records a UTC times
   assert.equal(saved.sentence, "I loved the movie, but the ending was disappointing.");
   assert.equal(saved.challengeId, "mixed");
   assert.equal(saved.participantId, participant.id);
+  assert.equal(saved.vibeConfidencePercent, null);
   assert.match(saved.createdAt, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
   assert(timestamp >= before - 1_000 && timestamp <= after + 1_000);
 });
@@ -201,10 +203,12 @@ test("saveScaleResult stores and replaces an ordered vibe-scale snapshot", async
     participantId: participant.id,
     placements: firstPlacements,
     challengePassed: true,
+    vibeConfidencePercent: 82,
   });
 
   assert.equal(firstResult.initialChallengePassed, true);
   assert.equal(firstResult.challengePassed, true);
+  assert.equal(firstResult.vibeConfidencePercent, 82);
   assert.match(firstResult.challengeCompletedAt, /^\d{4}-\d{2}-\d{2}T/);
   assert.match(firstResult.scaleSubmittedAt, /^\d{4}-\d{2}-\d{2}T/);
   assert.deepEqual(firstResult.wordPlacements, firstPlacements);
@@ -220,10 +224,12 @@ test("saveScaleResult stores and replaces an ordered vibe-scale snapshot", async
     participantId: participant.id,
     placements: replacementPlacements,
     challengePassed: false,
+    vibeConfidencePercent: 64,
   });
 
   assert.equal(replacement.initialChallengePassed, true);
   assert.equal(replacement.challengePassed, true);
+  assert.equal(replacement.vibeConfidencePercent, 64);
   assert.equal(replacement.challengeCompletedAt, firstResult.challengeCompletedAt);
   assert.equal(replacement.scaleSubmittedAt, firstResult.scaleSubmittedAt);
   assert.deepEqual(replacement.wordPlacements, replacementPlacements);
@@ -243,6 +249,7 @@ test("saveScaleResult validates placements and enforces submission ownership", a
     submissionId: submission.id,
     participantId: owner.id,
     challengePassed: true,
+    vibeConfidencePercent: 50,
     placements: [{ tokenIndex: 0, tokenText: "A", rating: 0 }],
   };
 
@@ -268,6 +275,12 @@ test("saveScaleResult validates placements and enforces submission ownership", a
     store.saveScaleResult({ ...valid, challengePassed: "yes" }),
     /challengePassed/i,
   );
+  for (const vibeConfidencePercent of [-1, 101, 2.5, "70", null]) {
+    await assert.rejects(
+      store.saveScaleResult({ ...valid, vibeConfidencePercent }),
+      /vibeConfidencePercent/i,
+    );
+  }
   assert.equal(
     await store.saveScaleResult({ ...valid, participantId: otherLearner.id }),
     null,
@@ -277,6 +290,7 @@ test("saveScaleResult validates placements and enforces submission ownership", a
   assert.equal(unchanged.initialChallengePassed, null);
   assert.equal(unchanged.challengePassed, null);
   assert.equal(unchanged.challengeCompletedAt, null);
+  assert.equal(unchanged.vibeConfidencePercent, null);
   assert.equal(unchanged.scaleSubmittedAt, null);
   assert.deepEqual(unchanged.wordPlacements, []);
 });
@@ -300,10 +314,12 @@ test("completeChallenge records a later pass without changing the initial result
       { tokenIndex: 4, tokenText: ".", rating: 0 },
     ],
     challengePassed: false,
+    vibeConfidencePercent: 45,
   });
 
   assert.equal(revealed.initialChallengePassed, false);
   assert.equal(revealed.challengePassed, false);
+  assert.equal(revealed.vibeConfidencePercent, 45);
   assert.equal(revealed.challengeCompletedAt, null);
 
   const completed = await store.completeChallenge({
@@ -344,6 +360,7 @@ test("completeChallenge enforces submission ownership", async (t) => {
     participantId: owner.id,
     placements: [{ tokenIndex: 0, tokenText: "The", rating: 0 }],
     challengePassed: false,
+    vibeConfidencePercent: 30,
   });
 
   assert.equal(
@@ -365,6 +382,157 @@ test("completeChallenge enforces submission ownership", async (t) => {
   assert.equal(unchanged.initialChallengePassed, false);
   assert.equal(unchanged.challengePassed, false);
   assert.equal(unchanged.challengeCompletedAt, null);
+  assert.equal(unchanged.vibeConfidencePercent, 30);
+});
+
+test("saveTweakAttempt appends an ordered change history and completes on a pass", async (t) => {
+  const { store } = await createTestStore(t);
+  const participant = await addParticipant(store);
+  const submission = await store.saveSentence({
+    sentence: "The concert was fine.",
+    challengeId: "clear-vibe",
+    participantId: participant.id,
+  });
+  await store.saveScaleResult({
+    submissionId: submission.id,
+    participantId: participant.id,
+    placements: [{ tokenIndex: 0, tokenText: "The", rating: 0 }],
+    challengePassed: false,
+    vibeConfidencePercent: 55,
+  });
+
+  const first = await store.saveTweakAttempt({
+    submissionId: submission.id,
+    participantId: participant.id,
+    beforeSentence: "The concert was fine.",
+    afterSentence: "The concert was average .",
+    tokenIndex: 3,
+    originalToken: "fine",
+    replacementText: "average",
+    beforeScore: 0.1,
+    afterScore: 0,
+    attemptPassed: false,
+  });
+  assert.equal(first.attemptIndex, 1);
+  assert.equal(first.originalToken, "fine");
+  assert.equal(first.replacementText, "average");
+  assert.equal(first.attemptPassed, false);
+  assert.equal(first.overallChallengePassed, false);
+  assert.equal(first.challengeCompletedAt, null);
+
+  const second = await store.saveTweakAttempt({
+    submissionId: submission.id,
+    participantId: participant.id,
+    beforeSentence: first.afterSentence,
+    afterSentence: "The concert was amazing .",
+    tokenIndex: 3,
+    originalToken: "average",
+    replacementText: "amazing",
+    beforeScore: 0,
+    afterScore: 0.8,
+    attemptPassed: true,
+  });
+  assert.equal(second.attemptIndex, 2);
+  assert.equal(second.attemptPassed, true);
+  assert.equal(second.overallChallengePassed, true);
+  assert.match(second.challengeCompletedAt, /^\d{4}-\d{2}-\d{2}T/);
+
+  const attempts = await store.getTweakAttempts(submission.id);
+  assert.deepEqual(attempts, [
+    {
+      id: first.id,
+      submissionId: submission.id,
+      attemptIndex: 1,
+      tokenIndex: 3,
+      originalToken: "fine",
+      replacementText: "average",
+      beforeSentence: "The concert was fine.",
+      afterSentence: "The concert was average .",
+      beforeScore: 0.1,
+      afterScore: 0,
+      attemptPassed: false,
+      createdAt: first.createdAt,
+    },
+    {
+      id: second.id,
+      submissionId: submission.id,
+      attemptIndex: 2,
+      tokenIndex: 3,
+      originalToken: "average",
+      replacementText: "amazing",
+      beforeSentence: "The concert was average .",
+      afterSentence: "The concert was amazing .",
+      beforeScore: 0,
+      afterScore: 0.8,
+      attemptPassed: true,
+      createdAt: second.createdAt,
+    },
+  ]);
+  const completed = await store.getById(submission.id);
+  assert.equal(completed.initialChallengePassed, false);
+  assert.equal(completed.challengePassed, true);
+  assert.equal(completed.challengeCompletedAt, second.challengeCompletedAt);
+});
+
+test("saveTweakAttempt enforces ownership, reveal order, and the current tweak chain", async (t) => {
+  const { store } = await createTestStore(t);
+  const owner = await addParticipant(store);
+  const otherLearner = await addParticipant(store);
+  const submission = await store.saveSentence({
+    sentence: "The concert happened.",
+    challengeId: "clear-vibe",
+    participantId: owner.id,
+  });
+  const attempt = {
+    submissionId: submission.id,
+    participantId: owner.id,
+    beforeSentence: submission.sentence,
+    afterSentence: "The concert improved .",
+    tokenIndex: 2,
+    originalToken: "happened",
+    replacementText: "improved",
+    beforeScore: 0,
+    afterScore: 0.2,
+    attemptPassed: false,
+  };
+
+  assert.equal(await store.saveTweakAttempt(attempt), null);
+  await store.saveScaleResult({
+    submissionId: submission.id,
+    participantId: owner.id,
+    placements: [{ tokenIndex: 0, tokenText: "The", rating: 0 }],
+    challengePassed: false,
+    vibeConfidencePercent: 40,
+  });
+  assert.equal(
+    await store.saveTweakAttempt({ ...attempt, participantId: otherLearner.id }),
+    null,
+  );
+
+  const saved = await store.saveTweakAttempt(attempt);
+  await assert.rejects(
+    store.saveTweakAttempt({ ...attempt, replacementText: "different" }),
+    (error) => {
+      assert(error instanceof TweakSequenceConflictError);
+      assert.equal(error.currentSentence, saved.afterSentence);
+      assert.equal(error.challengePassed, false);
+      return true;
+    },
+  );
+  assert.equal((await store.getTweakAttempts(submission.id)).length, 1);
+
+  await assert.rejects(
+    store.saveTweakAttempt({ ...attempt, beforeScore: 2 }),
+    /beforeScore/i,
+  );
+  await assert.rejects(
+    store.saveTweakAttempt({ ...attempt, tokenIndex: -1 }),
+    /tokenIndex/i,
+  );
+  await assert.rejects(
+    store.saveTweakAttempt({ ...attempt, replacementText: " " }),
+    /replacementText/i,
+  );
 });
 
 test("sentence validation rejects malformed submissions and missing participants", async (t) => {
@@ -478,6 +646,7 @@ test("startup migrates existing submissions to the legacy participant", async ()
     assert.equal(migrated.initialChallengePassed, null);
     assert.equal(migrated.challengePassed, null);
     assert.equal(migrated.challengeCompletedAt, null);
+    assert.equal(migrated.vibeConfidencePercent, null);
     assert.equal(migrated.scaleSubmittedAt, null);
     assert.deepEqual(migrated.wordPlacements, []);
     assert.equal(legacyParticipant.id, 0);
@@ -526,18 +695,21 @@ test("startup backfills initial and completion fields from the previous result s
     assert.equal(passed.challengePassed, true);
     assert.equal(passed.scaleSubmittedAt, "2026-01-02T03:04:05.000Z");
     assert.equal(passed.challengeCompletedAt, passed.scaleSubmittedAt);
+    assert.equal(passed.vibeConfidencePercent, null);
 
     const failed = await store.getById(2);
     assert.equal(failed.initialChallengePassed, false);
     assert.equal(failed.challengePassed, false);
     assert.equal(failed.scaleSubmittedAt, "2026-02-03T04:05:06.000Z");
     assert.equal(failed.challengeCompletedAt, null);
+    assert.equal(failed.vibeConfidencePercent, null);
 
     const unevaluated = await store.getById(3);
     assert.equal(unevaluated.initialChallengePassed, null);
     assert.equal(unevaluated.challengePassed, null);
     assert.equal(unevaluated.scaleSubmittedAt, "2026-03-04T05:06:07.000Z");
     assert.equal(unevaluated.challengeCompletedAt, null);
+    assert.equal(unevaluated.vibeConfidencePercent, null);
   } finally {
     await store.close();
   }
@@ -621,6 +793,7 @@ test("store methods reject calls after the connection pool closes", async () => 
       participantId: 1,
       placements: [{ tokenIndex: 0, tokenText: "Too", rating: 0 }],
       challengePassed: false,
+      vibeConfidencePercent: 50,
     }),
     /closed/,
   );
@@ -628,4 +801,20 @@ test("store methods reject calls after the connection pool closes", async () => 
     store.completeChallenge({ submissionId: 1, participantId: 1 }),
     /closed/,
   );
+  await assert.rejects(
+    store.saveTweakAttempt({
+      submissionId: 1,
+      participantId: 1,
+      beforeSentence: "Before",
+      afterSentence: "After",
+      tokenIndex: 0,
+      originalToken: "Before",
+      replacementText: "After",
+      beforeScore: 0,
+      afterScore: 0,
+      attemptPassed: false,
+    }),
+    /closed/,
+  );
+  await assert.rejects(store.getTweakAttempts(1), /closed/);
 });

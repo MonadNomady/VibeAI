@@ -5,6 +5,7 @@ import { createServer } from "node:http";
 import { fileURLToPath } from "node:url";
 import { extname, join, resolve } from "node:path";
 import {
+  TweakSequenceConflictError,
   createSentenceStore,
   databaseUrlFromEnvironment,
   normalizeDisplayName,
@@ -206,6 +207,41 @@ function normalizeRatings(ratings, expectedCount) {
   });
 }
 
+function normalizeConfidencePercent(confidencePercent) {
+  if (
+    !Number.isInteger(confidencePercent)
+    || confidencePercent < 0
+    || confidencePercent > 100
+  ) {
+    throw new RangeError("confidencePercent must be an integer from 0 to 100");
+  }
+  return confidencePercent;
+}
+
+function normalizeTweakTokenIndex(tokenIndex, tokenCount) {
+  if (!Number.isSafeInteger(tokenIndex) || tokenIndex < 0 || tokenIndex >= tokenCount) {
+    throw new RangeError("tokenIndex must identify a displayed token");
+  }
+  return tokenIndex;
+}
+
+function normalizeReplacementText(replacementText) {
+  if (typeof replacementText !== "string") {
+    throw new TypeError("replacementText must be a string");
+  }
+  const normalized = replacementText.trim();
+  if (!normalized) {
+    throw new RangeError("replacementText must not be empty");
+  }
+  if (normalized.includes("\0")) {
+    throw new RangeError("replacementText must not contain null characters");
+  }
+  if ([...normalized].length > 240) {
+    throw new RangeError("replacementText must be 240 characters or fewer");
+  }
+  return normalized;
+}
+
 async function handleSessionApi(request, response, store) {
   if (request.method === "DELETE") {
     const token = cookieValue(request, SESSION_COOKIE_NAME);
@@ -350,12 +386,14 @@ async function handleScaleResultApi(request, response, store, submissionId) {
     const body = await readJsonBody(request);
     const tokens = tokenizeSentence(submission.sentence);
     const ratings = normalizeRatings(body.ratings, tokens.length);
+    const vibeConfidencePercent = normalizeConfidencePercent(body.confidencePercent);
     const analysis = analyzeSentiment(submission.sentence);
     const challengePassed = didPassChallenge(submission.challengeId, analysis.score);
     const saved = await store.saveScaleResult({
       submissionId,
       participantId: session.participant.id,
       challengePassed,
+      vibeConfidencePercent,
       placements: tokens.map((token, tokenIndex) => ({
         tokenIndex,
         tokenText: token.text,
@@ -371,6 +409,7 @@ async function handleScaleResultApi(request, response, store, submissionId) {
     writeJson(response, 200, {
       initialChallengePassed: saved.initialChallengePassed,
       challengePassed: saved.challengePassed,
+      vibeConfidencePercent: saved.vibeConfidencePercent,
       scaleSubmittedAt: saved.scaleSubmittedAt,
     });
   } catch (error) {
@@ -387,9 +426,9 @@ async function handleScaleResultApi(request, response, store, submissionId) {
   }
 }
 
-async function handleChallengeCompletionApi(request, response, store, submissionId) {
-  if (request.method !== "PUT") {
-    writeJson(response, 405, { error: "Method not allowed." }, { Allow: "PUT" });
+async function handleTweakAttemptApi(request, response, store, submissionId) {
+  if (request.method !== "POST") {
+    writeJson(response, 405, { error: "Method not allowed." }, { Allow: "POST" });
     return;
   }
 
@@ -402,7 +441,7 @@ async function handleChallengeCompletionApi(request, response, store, submission
       writeJson(
         response,
         401,
-        { error: "Enter your classroom name before completing a challenge." },
+        { error: "Enter your classroom name before saving a Tweak Lab change." },
         headers,
       );
       return;
@@ -414,39 +453,65 @@ async function handleChallengeCompletionApi(request, response, store, submission
       return;
     }
     if (submission.initialChallengePassed == null) {
-      writeJson(response, 409, { error: "Save the vibe-scale choices before completing the challenge." });
+      writeJson(response, 409, { error: "Save the vibe-scale choices before using Tweak Lab." });
       return;
     }
 
     const body = await readJsonBody(request);
-    const tweakedSentence = normalizeSentence(body.sentence);
-    const analysis = analyzeSentiment(tweakedSentence);
-    const attemptPassed = didPassChallenge(submission.challengeId, analysis.score);
+    const beforeSentence = normalizeSentence(body.beforeSentence);
+    const tokens = tokenizeSentence(beforeSentence);
+    const tokenIndex = normalizeTweakTokenIndex(body.tokenIndex, tokens.length);
+    const replacementText = normalizeReplacementText(body.replacementText);
+    const originalToken = tokens[tokenIndex].text;
+    const afterSentence = normalizeSentence(
+      tokens
+        .map((token, index) => index === tokenIndex ? replacementText : token.text)
+        .join(" "),
+    );
+    const beforeAnalysis = analyzeSentiment(beforeSentence);
+    const afterAnalysis = analyzeSentiment(afterSentence);
+    const attemptPassed = didPassChallenge(submission.challengeId, afterAnalysis.score);
+    const saved = await store.saveTweakAttempt({
+      submissionId,
+      participantId: session.participant.id,
+      beforeSentence,
+      afterSentence,
+      tokenIndex,
+      originalToken,
+      replacementText,
+      beforeScore: beforeAnalysis.score,
+      afterScore: afterAnalysis.score,
+      attemptPassed,
+    });
 
-    if (!attemptPassed) {
-      writeJson(response, 200, {
-        attemptPassed: false,
-        challengePassed: submission.challengePassed === true,
-        challengeCompletedAt: submission.challengeCompletedAt,
+    if (!saved) {
+      writeJson(response, 409, { error: "Save the vibe-scale choices before using Tweak Lab." });
+      return;
+    }
+
+    writeJson(response, 201, {
+      attemptId: saved.id,
+      attemptIndex: saved.attemptIndex,
+      tokenIndex: saved.tokenIndex,
+      originalToken: saved.originalToken,
+      replacementText: saved.replacementText,
+      afterSentence: saved.afterSentence,
+      beforeScore: saved.beforeScore,
+      afterScore: saved.afterScore,
+      attemptPassed: saved.attemptPassed,
+      challengePassed: saved.overallChallengePassed,
+      challengeCompletedAt: saved.challengeCompletedAt,
+      createdAt: saved.createdAt,
+    });
+  } catch (error) {
+    if (error instanceof TweakSequenceConflictError) {
+      writeJson(response, 409, {
+        error: error.message,
+        currentSentence: error.currentSentence,
+        challengePassed: error.challengePassed,
       });
       return;
     }
-
-    const saved = await store.completeChallenge({
-      submissionId,
-      participantId: session.participant.id,
-    });
-    if (!saved) {
-      writeJson(response, 409, { error: "Save the vibe-scale choices before completing the challenge." });
-      return;
-    }
-
-    writeJson(response, 200, {
-      attemptPassed: true,
-      challengePassed: true,
-      challengeCompletedAt: saved.challengeCompletedAt,
-    });
-  } catch (error) {
     if (error instanceof RequestError) {
       writeJson(response, error.status, { error: error.message });
       return;
@@ -455,8 +520,8 @@ async function handleChallengeCompletionApi(request, response, store, submission
       writeJson(response, 400, { error: error.message });
       return;
     }
-    console.error("Failed to complete challenge:", error);
-    writeJson(response, 500, { error: "The challenge result could not be saved." });
+    console.error("Failed to save Tweak Lab attempt:", error);
+    writeJson(response, 500, { error: "The Tweak Lab change could not be saved." });
   }
 }
 
@@ -498,7 +563,7 @@ export function createVibeCheckServer({ rootDirectory = defaultRoot, store } = {
     || typeof store.saveSentence !== "function"
     || typeof store.getById !== "function"
     || typeof store.saveScaleResult !== "function"
-    || typeof store.completeChallenge !== "function"
+    || typeof store.saveTweakAttempt !== "function"
     || typeof store.close !== "function"
   ) {
     throw new TypeError(
@@ -543,11 +608,21 @@ export function createVibeCheckServer({ rootDirectory = defaultRoot, store } = {
         /^\/api\/sentences\/([1-9]\d*)\/challenge-completion$/,
       );
       if (challengeCompletionMatch) {
-        const submissionId = Number(challengeCompletionMatch[1]);
+        writeJson(response, 410, {
+          error: "This endpoint has been retired. Save each Tweak Lab change instead.",
+        });
+        return;
+      }
+
+      const tweakAttemptMatch = pathname.match(
+        /^\/api\/sentences\/([1-9]\d*)\/tweak-attempts$/,
+      );
+      if (tweakAttemptMatch) {
+        const submissionId = Number(tweakAttemptMatch[1]);
         if (!Number.isSafeInteger(submissionId)) {
           throw new RequestError(400, "Submission ID must be a positive integer.");
         }
-        await handleChallengeCompletionApi(request, response, store, submissionId);
+        await handleTweakAttemptApi(request, response, store, submissionId);
         return;
       }
 

@@ -144,14 +144,21 @@ function resetEmotionAnalysis() {
 
 async function apiError(response, fallbackMessage) {
   let message = fallbackMessage;
+  let body;
   try {
-    const body = await response.json();
+    body = await response.json();
     if (body?.error) message = body.error;
   } catch {
     // Keep the safe fallback when the server did not return JSON.
   }
   const error = new Error(message);
   error.status = response.status;
+  if (typeof body?.currentSentence === "string") {
+    error.currentSentence = body.currentSentence;
+  }
+  if (typeof body?.challengePassed === "boolean") {
+    error.challengePassed = body.challengePassed;
+  }
   return error;
 }
 
@@ -213,11 +220,11 @@ async function saveSentenceInput(sentence, challengeId) {
   return response.json();
 }
 
-async function saveScaleResult(submissionId, ratings) {
+async function saveScaleResult(submissionId, ratings, confidencePercent) {
   const response = await fetch(`/api/sentences/${submissionId}/scale-result`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ ratings }),
+    body: JSON.stringify({ ratings, confidencePercent }),
   });
 
   if (!response.ok) {
@@ -227,15 +234,15 @@ async function saveScaleResult(submissionId, ratings) {
   return response.json();
 }
 
-async function saveChallengeCompletion(submissionId, sentence) {
-  const response = await fetch(`/api/sentences/${submissionId}/challenge-completion`, {
-    method: "PUT",
+async function saveTweakAttempt(submissionId, { beforeSentence, tokenIndex, replacementText }) {
+  const response = await fetch(`/api/sentences/${submissionId}/tweak-attempts`, {
+    method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ sentence }),
+    body: JSON.stringify({ beforeSentence, tokenIndex, replacementText }),
   });
 
   if (!response.ok) {
-    throw await apiError(response, "The challenge result could not be saved.");
+    throw await apiError(response, "The Tweak Lab change could not be saved.");
   }
 
   return response.json();
@@ -333,7 +340,7 @@ function renderParticipantGate() {
                 required
               />
               <p class="participant-help" id="participant-help">Use 40 characters or fewer for your first name, a nickname, or the class code your teacher gave you. Don’t enter your full name or other private information.</p>
-              <p class="participant-storage" id="participant-storage">We’ll save this classroom name with the sentences you submit, your vibe-scale choices, and whether each challenge was passed.</p>
+              <p class="participant-storage" id="participant-storage">We’ll save this classroom name with the sentences you submit, your vibe-scale choices, confidence percentage, Tweak Lab changes and before-and-after results, and whether each challenge was passed.</p>
               <p class="field-error" id="participant-error" role="alert">${escapeHtml(participantSession.message)}</p>
               <button class="gradient-button full-width" id="participant-submit" type="submit" ${draftName.trim() && !isSaving ? "" : "disabled"}>
                 ${isSaving ? "Saving your name…" : "Start the activity"}
@@ -494,7 +501,7 @@ function renderInput() {
             >${escapeHtml(state.sentence)}</textarea>
             <span class="character-count"><span id="character-count">${state.sentence.length}</span>/240</span>
           </div>
-          <p class="storage-note" id="storage-note">This sentence, your vibe-scale choices, and the challenge result will be saved with the classroom name <strong>${escapeHtml(participantSession.participant.displayName)}</strong>. Don’t include anyone’s full name, address, username, or other private information.</p>
+          <p class="storage-note" id="storage-note">This sentence, your vibe-scale choices, confidence percentage, Tweak Lab changes and before-and-after results, and challenge result will be saved with the classroom name <strong>${escapeHtml(participantSession.participant.displayName)}</strong>. Don’t include anyone’s full name, address, username, or other private information.</p>
           <p class="field-error" id="input-error" aria-live="polite"></p>
           <p id="challenge-helper" class="starter-label">${escapeHtml(challenge.helper)}</p>
           <ul class="starter-list" aria-label="Sentence starters">
@@ -578,11 +585,12 @@ function renderInput() {
 
     const challengeId = challenge.id;
     const submissionKey = `${participantSession.participant.id}\u0000${challengeId}\u0000${sentence}`;
-
-    if (
+    const startsNewSubmission = (
       state.savedSubmissionKey !== submissionKey
       || !Number.isSafeInteger(state.submissionId)
-    ) {
+    );
+
+    if (startsNewSubmission) {
       const controls = [...app.querySelectorAll("button, textarea")];
       form.setAttribute("aria-busy", "true");
       controls.forEach((control) => { control.disabled = true; });
@@ -627,6 +635,12 @@ function renderInput() {
     state.userRatings = Object.fromEntries(tokens.map((token) => [token.id, 0]));
     state.analysis = null;
     state.initialChallengePassed = null;
+    if (startsNewSubmission) {
+      state.tweakedSentence = "";
+      state.tweakedAnalysis = null;
+      state.selectedTokenIndex = 0;
+      state.challengeCompletionSaved = false;
+    }
     resetEmotionAnalysis();
     navigate("scale");
     showToast("Message saved to the class database.");
@@ -812,9 +826,16 @@ function renderScale(options = {}) {
     saveError.textContent = "";
 
     try {
-      const saved = await saveScaleResult(state.submissionId, ratings);
-      if (typeof saved?.initialChallengePassed !== "boolean") {
-        throw new Error("The server returned an invalid challenge result.");
+      const saved = await saveScaleResult(
+        state.submissionId,
+        ratings,
+        state.userConfidence,
+      );
+      if (
+        typeof saved?.initialChallengePassed !== "boolean"
+        || saved?.vibeConfidencePercent !== state.userConfidence
+      ) {
+        throw new Error("The server returned an invalid vibe-scale result.");
       }
       state.analysis = analysis;
       state.initialChallengePassed = saved.initialChallengePassed;
@@ -1165,7 +1186,6 @@ function renderResults() {
   app.innerHTML = `
     <section class="screen" aria-labelledby="results-title">
       ${participantIdentityMarkup()}
-      <button class="back-button" id="back-to-scale" type="button">← Revisit my word map</button>
 
       <div class="stage-heading">
         <p class="eyebrow">Inside the model</p>
@@ -1280,7 +1300,6 @@ function renderResults() {
       </article>
 
       <div class="results-actions">
-        <button class="text-button" id="adjust-map" type="button">Adjust my word map</button>
         ${
       passed
           ? `<button class="gradient-button" id="next-challenge-btn" type="button">Next Challenge</button>`
@@ -1290,9 +1309,6 @@ function renderResults() {
     </section>
   `;
 
-  app.querySelector("#back-to-scale").addEventListener("click", () => navigate("scale"));
-  app.querySelector("#adjust-map").addEventListener("click", () => navigate("scale"));
-
   app.querySelector("#next-challenge-btn")?.addEventListener("click", () => {
     state.challengeIndex = (state.challengeIndex + 1) % challenges.length;
     cancelEmotionAnalysis();
@@ -1301,10 +1317,11 @@ function renderResults() {
   });
 
   app.querySelector("#tweak-btn")?.addEventListener("click", () => {
-    state.tweakedSentence = state.sentence;
-    state.tweakedAnalysis = analyzeSentiment(state.sentence);
-    state.selectedTokenIndex = 0;
-    state.challengeCompletionSaved = false;
+    if (!state.tweakedSentence) {
+      state.tweakedSentence = state.sentence;
+      state.tweakedAnalysis = analyzeSentiment(state.sentence);
+      state.selectedTokenIndex = 0;
+    }
     navigate("tweak");
   });
 
@@ -1360,11 +1377,12 @@ function renderTweak() {
             placeholder="Type your replacement word..." 
             autocomplete="off" 
             maxlength="240"
-            aria-describedby="tweak-input-error"
+            aria-describedby="tweak-storage-note tweak-input-error"
             required 
           />
           <button type="submit" class="apply-button">Apply</button>
         </form>
+        <p class="storage-note" id="tweak-storage-note">Each Apply saves the selected token, its replacement, and the before-and-after result with your classroom name.</p>
         <p class="field-error" id="tweak-input-error" role="alert"></p>
 
         <!-- Before and After Comparison -->
@@ -1443,62 +1461,82 @@ function renderTweak() {
       return;
     }
 
-    const nextAnalysis = analyzeSentiment(nextSentence);
-    const nextPasses = didPassChallenge(challenge.id, nextAnalysis.score);
-    if (nextPasses && !state.challengeCompletionSaved) {
-      if (!Number.isSafeInteger(state.submissionId) || state.submissionId < 1) {
-        inputError.textContent = "Return to the message page and save this sentence before finishing.";
-        return;
-      }
-
-      const applyButton = form.querySelector(".apply-button");
-      const controls = [...app.querySelectorAll("button, input")].map((control) => ({
-        control,
-        wasDisabled: control.disabled,
-      }));
-      controls.forEach(({ control }) => { control.disabled = true; });
-      form.setAttribute("aria-busy", "true");
-      applyButton.textContent = "Saving…";
-      inputError.textContent = "";
-
-      try {
-        const saved = await saveChallengeCompletion(state.submissionId, nextSentence);
-        if (saved?.attemptPassed !== true || saved?.challengePassed !== true) {
-          throw new Error("The server did not confirm that this challenge was passed.");
-        }
-        state.challengeCompletionSaved = true;
-      } catch (saveError) {
-        if (saveError.status === 401) {
-          const challengeIndex = state.challengeIndex;
-          cancelEmotionAnalysis();
-          state = initialState();
-          state.challengeIndex = challengeIndex;
-          participantSession = {
-            status: "required",
-            participant: null,
-            draftName: "",
-            message: "Your classroom session ended. Enter your classroom name again.",
-          };
-          render();
-          focusScreenHeading();
-          return;
-        }
-
-        form.removeAttribute("aria-busy");
-        controls.forEach(({ control, wasDisabled }) => { control.disabled = wasDisabled; });
-        applyButton.textContent = "Apply";
-        inputError.textContent = saveError.message || "We couldn’t save the completed challenge. Check the server and try again.";
-        input.focus();
-        return;
-      }
+    if (!Number.isSafeInteger(state.submissionId) || state.submissionId < 1) {
+      inputError.textContent = "Return to the message page and save this sentence before making a Tweak Lab change.";
+      return;
     }
 
-    state.tweakedSentence = nextSentence;
-    state.tweakedAnalysis = nextAnalysis;
+    const applyButton = form.querySelector(".apply-button");
+    const controls = [...app.querySelectorAll("button, input")].map((control) => ({
+      control,
+      wasDisabled: control.disabled,
+    }));
+    controls.forEach(({ control }) => { control.disabled = true; });
+    form.setAttribute("aria-busy", "true");
+    applyButton.textContent = "Saving…";
+    inputError.textContent = "";
+
+    let saved;
+    try {
+      saved = await saveTweakAttempt(state.submissionId, {
+        beforeSentence: state.tweakedSentence,
+        tokenIndex: state.selectedTokenIndex,
+        replacementText: replacement,
+      });
+      if (
+        typeof saved?.afterSentence !== "string"
+        || typeof saved?.attemptPassed !== "boolean"
+        || typeof saved?.challengePassed !== "boolean"
+      ) {
+        throw new Error("The server returned an invalid Tweak Lab result.");
+      }
+    } catch (saveError) {
+      if (saveError.status === 401) {
+        const challengeIndex = state.challengeIndex;
+        cancelEmotionAnalysis();
+        state = initialState();
+        state.challengeIndex = challengeIndex;
+        participantSession = {
+          status: "required",
+          participant: null,
+          draftName: "",
+          message: "Your classroom session ended. Enter your classroom name again.",
+        };
+        render();
+        focusScreenHeading();
+        return;
+      }
+
+      if (
+        saveError.status === 409
+        && typeof saveError.currentSentence === "string"
+        && typeof saveError.challengePassed === "boolean"
+      ) {
+        state.tweakedSentence = saveError.currentSentence;
+        state.tweakedAnalysis = analyzeSentiment(saveError.currentSentence);
+        state.challengeCompletionSaved = saveError.challengePassed;
+        renderTweak();
+        showToast("Tweak Lab resynced with the saved change.");
+        return;
+      }
+
+      form.removeAttribute("aria-busy");
+      controls.forEach(({ control, wasDisabled }) => { control.disabled = wasDisabled; });
+      applyButton.textContent = "Apply";
+      inputError.textContent = saveError.message || "We couldn’t save this Tweak Lab change. Check the server and try again.";
+      input.focus();
+      return;
+    }
+
+    state.tweakedSentence = saved.afterSentence;
+    state.tweakedAnalysis = analyzeSentiment(saved.afterSentence);
+    state.challengeCompletionSaved = saved.challengePassed;
     renderTweak();
-    if (nextPasses && state.challengeCompletionSaved) {
-      showToast("Challenge completion saved to the class database.");
-    }
+    showToast(
+      saved.attemptPassed
+        ? "Tweak saved—challenge complete!"
+        : "Tweak Lab change saved to the class database.",
+    );
   });
 
   app.querySelector("#finish-challenge").addEventListener("click", () => {

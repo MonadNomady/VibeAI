@@ -33,6 +33,9 @@ const CREATE_SUBMISSIONS_SQL = `
     initial_challenge_passed BOOLEAN,
     challenge_passed BOOLEAN,
     challenge_completed_at TIMESTAMPTZ,
+    vibe_confidence_percent SMALLINT CHECK (
+      vibe_confidence_percent BETWEEN 0 AND 100
+    ),
     scale_submitted_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
   )
@@ -63,6 +66,13 @@ const ADD_SCALE_SUBMITTED_COLUMN_SQL = `
   ADD COLUMN IF NOT EXISTS scale_submitted_at TIMESTAMPTZ
 `;
 
+const ADD_VIBE_CONFIDENCE_COLUMN_SQL = `
+  ALTER TABLE sentence_submissions
+  ADD COLUMN IF NOT EXISTS vibe_confidence_percent SMALLINT CHECK (
+    vibe_confidence_percent BETWEEN 0 AND 100
+  )
+`;
+
 const DROP_PARTICIPANT_FOREIGN_KEY_SQL = `
   ALTER TABLE sentence_submissions
   DROP CONSTRAINT IF EXISTS sentence_submissions_participant_fk
@@ -85,6 +95,35 @@ const CREATE_VIBE_SCALE_PLACEMENTS_SQL = `
       FOREIGN KEY (submission_id) REFERENCES sentence_submissions(id) ON DELETE CASCADE
   )
 `;
+
+const CREATE_TWEAK_ATTEMPTS_SQL = `
+  CREATE TABLE IF NOT EXISTS tweak_attempts (
+    id BIGSERIAL PRIMARY KEY,
+    submission_id BIGINT NOT NULL,
+    attempt_index INTEGER NOT NULL CHECK (attempt_index > 0),
+    token_index SMALLINT NOT NULL CHECK (token_index >= 0),
+    original_token VARCHAR(${MAX_SENTENCE_LENGTH}) NOT NULL CHECK (original_token <> ''),
+    replacement_text VARCHAR(${MAX_SENTENCE_LENGTH}) NOT NULL CHECK (replacement_text <> ''),
+    before_sentence VARCHAR(${MAX_SENTENCE_LENGTH}) NOT NULL CHECK (before_sentence <> ''),
+    after_sentence VARCHAR(${MAX_SENTENCE_LENGTH}) NOT NULL CHECK (after_sentence <> ''),
+    before_score DOUBLE PRECISION NOT NULL CHECK (before_score BETWEEN -1 AND 1),
+    after_score DOUBLE PRECISION NOT NULL CHECK (after_score BETWEEN -1 AND 1),
+    challenge_passed BOOLEAN NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (submission_id, attempt_index),
+    CONSTRAINT tweak_attempts_submission_fk
+      FOREIGN KEY (submission_id) REFERENCES sentence_submissions(id) ON DELETE CASCADE
+  )
+`;
+
+export class TweakSequenceConflictError extends Error {
+  constructor(currentSentence, challengePassed) {
+    super("The Tweak Lab sentence changed before this attempt could be saved.");
+    this.name = "TweakSequenceConflictError";
+    this.currentSentence = currentSentence;
+    this.challengePassed = challengePassed;
+  }
+}
 
 export function normalizeSentence(sentence) {
   if (typeof sentence !== "string") {
@@ -191,6 +230,52 @@ function validateChallengePassed(challengePassed) {
   return challengePassed;
 }
 
+function validateVibeConfidencePercent(vibeConfidencePercent) {
+  if (
+    !Number.isInteger(vibeConfidencePercent)
+    || vibeConfidencePercent < 0
+    || vibeConfidencePercent > 100
+  ) {
+    throw new RangeError("vibeConfidencePercent must be an integer from 0 to 100");
+  }
+  return vibeConfidencePercent;
+}
+
+function normalizeTweakText(value, name) {
+  if (typeof value !== "string") {
+    throw new TypeError(`${name} must be a string`);
+  }
+  const normalized = value.trim();
+  if (!normalized) {
+    throw new RangeError(`${name} must not be empty`);
+  }
+  if (normalized.includes("\0")) {
+    throw new RangeError(`${name} must not contain null characters`);
+  }
+  if ([...normalized].length > MAX_SENTENCE_LENGTH) {
+    throw new RangeError(`${name} must be ${MAX_SENTENCE_LENGTH} characters or fewer`);
+  }
+  return normalized;
+}
+
+function validateTweakTokenIndex(tokenIndex) {
+  if (
+    !Number.isSafeInteger(tokenIndex)
+    || tokenIndex < 0
+    || tokenIndex >= MAX_SCALE_PLACEMENTS
+  ) {
+    throw new RangeError("tokenIndex must identify a displayed token");
+  }
+  return tokenIndex;
+}
+
+function validateSentimentScore(score, name) {
+  if (!Number.isFinite(score) || score < -1 || score > 1) {
+    throw new RangeError(`${name} must be a finite number from -1 to 1`);
+  }
+  return score;
+}
+
 function validateSessionHash(sessionTokenHash) {
   if (typeof sessionTokenHash !== "string" || !/^[a-f0-9]{64}$/.test(sessionTokenHash)) {
     throw new RangeError("sessionTokenHash must be a lowercase SHA-256 hash");
@@ -248,6 +333,9 @@ function normalizeSubmissionRow(row) {
     challengeCompletedAt: row.challenge_completed_at == null
       ? null
       : normalizeTimestamp(row.challenge_completed_at),
+    vibeConfidencePercent: row.vibe_confidence_percent == null
+      ? null
+      : Number(row.vibe_confidence_percent),
     scaleSubmittedAt: row.scale_submitted_at == null
       ? null
       : normalizeTimestamp(row.scale_submitted_at),
@@ -261,6 +349,24 @@ function normalizePlacementRow(row) {
     tokenIndex: normalizeDatabaseId(row.token_index, "token index"),
     tokenText: row.token_text,
     rating: Number(row.rating),
+  };
+}
+
+function normalizeTweakAttemptRow(row) {
+  if (row === undefined) return null;
+  return {
+    id: normalizeDatabaseId(row.id, "tweak attempt id"),
+    submissionId: normalizeDatabaseId(row.submission_id, "submission id"),
+    attemptIndex: normalizeDatabaseId(row.attempt_index, "attempt index"),
+    tokenIndex: normalizeDatabaseId(row.token_index, "token index"),
+    originalToken: row.original_token,
+    replacementText: row.replacement_text,
+    beforeSentence: row.before_sentence,
+    afterSentence: row.after_sentence,
+    beforeScore: Number(row.before_score),
+    afterScore: Number(row.after_score),
+    attemptPassed: row.challenge_passed === true,
+    createdAt: normalizeTimestamp(row.created_at),
   };
 }
 
@@ -285,6 +391,7 @@ async function initializeSchema(database) {
     await client.query(ADD_INITIAL_CHALLENGE_PASSED_COLUMN_SQL);
     await client.query(ADD_CHALLENGE_PASSED_COLUMN_SQL);
     await client.query(ADD_CHALLENGE_COMPLETED_COLUMN_SQL);
+    await client.query(ADD_VIBE_CONFIDENCE_COLUMN_SQL);
     await client.query(ADD_SCALE_SUBMITTED_COLUMN_SQL);
     // Preserve results if this app version briefly ran with only challenge_passed.
     await client.query(
@@ -316,6 +423,7 @@ async function initializeSchema(database) {
     await client.query(DROP_PARTICIPANT_FOREIGN_KEY_SQL);
     await client.query(ADD_PARTICIPANT_FOREIGN_KEY_SQL);
     await client.query(CREATE_VIBE_SCALE_PLACEMENTS_SQL);
+    await client.query(CREATE_TWEAK_ATTEMPTS_SQL);
     await client.query(
       `
         CREATE INDEX IF NOT EXISTS sentence_submissions_participant_created_idx
@@ -483,6 +591,7 @@ export async function createSentenceStore({ connectionString, pool } = {}) {
             initial_challenge_passed,
             challenge_passed,
             challenge_completed_at,
+            vibe_confidence_percent,
             scale_submitted_at,
             created_at
         `,
@@ -503,6 +612,7 @@ export async function createSentenceStore({ connectionString, pool } = {}) {
             initial_challenge_passed,
             challenge_passed,
             challenge_completed_at,
+            vibe_confidence_percent,
             scale_submitted_at,
             created_at
           FROM sentence_submissions
@@ -531,12 +641,14 @@ export async function createSentenceStore({ connectionString, pool } = {}) {
       participantId,
       placements,
       challengePassed,
+      vibeConfidencePercent,
     } = {}) {
       assertOpen();
       const normalizedSubmissionId = validatePositiveId(submissionId, "submissionId");
       const normalizedParticipantId = validatePositiveId(participantId, "participantId");
       const normalizedPlacements = normalizeScalePlacements(placements);
       const normalizedPassed = validateChallengePassed(challengePassed);
+      const normalizedConfidence = validateVibeConfidencePercent(vibeConfidencePercent);
       const client = await database.connect();
 
       try {
@@ -551,6 +663,7 @@ export async function createSentenceStore({ connectionString, pool } = {}) {
                   WHEN $3 THEN CURRENT_TIMESTAMP::TIMESTAMPTZ
                   ELSE NULL
                 END,
+                vibe_confidence_percent = $4,
                 scale_submitted_at = COALESCE(
                   scale_submitted_at,
                   CURRENT_TIMESTAMP::TIMESTAMPTZ
@@ -564,10 +677,16 @@ export async function createSentenceStore({ connectionString, pool } = {}) {
               initial_challenge_passed,
               challenge_passed,
               challenge_completed_at,
+              vibe_confidence_percent,
               scale_submitted_at,
               created_at
           `,
-          [normalizedSubmissionId, normalizedParticipantId, normalizedPassed],
+          [
+            normalizedSubmissionId,
+            normalizedParticipantId,
+            normalizedPassed,
+            normalizedConfidence,
+          ],
         );
 
         if (updated.rows.length === 0) {
@@ -640,12 +759,182 @@ export async function createSentenceStore({ connectionString, pool } = {}) {
             initial_challenge_passed,
             challenge_passed,
             challenge_completed_at,
+            vibe_confidence_percent,
             scale_submitted_at,
             created_at
         `,
         [normalizedSubmissionId, normalizedParticipantId],
       );
       return normalizeSubmissionRow(result.rows[0]);
+    },
+
+    async saveTweakAttempt({
+      submissionId,
+      participantId,
+      beforeSentence,
+      afterSentence,
+      tokenIndex,
+      originalToken,
+      replacementText,
+      beforeScore,
+      afterScore,
+      attemptPassed,
+    } = {}) {
+      assertOpen();
+      const normalizedSubmissionId = validatePositiveId(submissionId, "submissionId");
+      const normalizedParticipantId = validatePositiveId(participantId, "participantId");
+      const normalizedBeforeSentence = normalizeTweakText(beforeSentence, "beforeSentence");
+      const normalizedAfterSentence = normalizeTweakText(afterSentence, "afterSentence");
+      const normalizedTokenIndex = validateTweakTokenIndex(tokenIndex);
+      const normalizedOriginalToken = normalizeTweakText(originalToken, "originalToken");
+      const normalizedReplacement = normalizeTweakText(replacementText, "replacementText");
+      const normalizedBeforeScore = validateSentimentScore(beforeScore, "beforeScore");
+      const normalizedAfterScore = validateSentimentScore(afterScore, "afterScore");
+      const normalizedAttemptPassed = validateChallengePassed(attemptPassed);
+      const client = await database.connect();
+
+      try {
+        await client.query("BEGIN");
+        const submissionResult = await client.query(
+          `
+            SELECT sentence, challenge_passed, challenge_completed_at
+            FROM sentence_submissions
+            WHERE id = $1
+              AND participant_id = $2
+              AND initial_challenge_passed IS NOT NULL
+            FOR UPDATE
+          `,
+          [normalizedSubmissionId, normalizedParticipantId],
+        );
+        if (submissionResult.rows.length === 0) {
+          await client.query("ROLLBACK");
+          return null;
+        }
+
+        const latestResult = await client.query(
+          `
+            SELECT attempt_index, after_sentence
+            FROM tweak_attempts
+            WHERE submission_id = $1
+            ORDER BY attempt_index DESC
+            LIMIT 1
+          `,
+          [normalizedSubmissionId],
+        );
+        const latest = latestResult.rows[0];
+        const currentSentence = latest?.after_sentence ?? submissionResult.rows[0].sentence;
+        if (currentSentence !== normalizedBeforeSentence) {
+          await client.query("ROLLBACK");
+          throw new TweakSequenceConflictError(
+            currentSentence,
+            submissionResult.rows[0].challenge_passed === true,
+          );
+        }
+
+        const attemptIndex = latest ? Number(latest.attempt_index) + 1 : 1;
+        const inserted = await client.query(
+          `
+            INSERT INTO tweak_attempts (
+              submission_id,
+              attempt_index,
+              token_index,
+              original_token,
+              replacement_text,
+              before_sentence,
+              after_sentence,
+              before_score,
+              after_score,
+              challenge_passed
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            RETURNING
+              id,
+              submission_id,
+              attempt_index,
+              token_index,
+              original_token,
+              replacement_text,
+              before_sentence,
+              after_sentence,
+              before_score,
+              after_score,
+              challenge_passed,
+              created_at
+          `,
+          [
+            normalizedSubmissionId,
+            attemptIndex,
+            normalizedTokenIndex,
+            normalizedOriginalToken,
+            normalizedReplacement,
+            normalizedBeforeSentence,
+            normalizedAfterSentence,
+            normalizedBeforeScore,
+            normalizedAfterScore,
+            normalizedAttemptPassed,
+          ],
+        );
+
+        let overallChallengePassed = submissionResult.rows[0].challenge_passed === true;
+        let challengeCompletedAt = submissionResult.rows[0].challenge_completed_at;
+        if (normalizedAttemptPassed) {
+          const completed = await client.query(
+            `
+              UPDATE sentence_submissions
+              SET challenge_passed = TRUE,
+                  challenge_completed_at = COALESCE(
+                    challenge_completed_at,
+                    CURRENT_TIMESTAMP::TIMESTAMPTZ
+                  )
+              WHERE id = $1 AND participant_id = $2
+              RETURNING challenge_passed, challenge_completed_at
+            `,
+            [normalizedSubmissionId, normalizedParticipantId],
+          );
+          overallChallengePassed = completed.rows[0].challenge_passed === true;
+          challengeCompletedAt = completed.rows[0].challenge_completed_at;
+        }
+
+        await client.query("COMMIT");
+        return {
+          ...normalizeTweakAttemptRow(inserted.rows[0]),
+          overallChallengePassed,
+          challengeCompletedAt: challengeCompletedAt == null
+            ? null
+            : normalizeTimestamp(challengeCompletedAt),
+        };
+      } catch (error) {
+        await client.query("ROLLBACK").catch(() => {});
+        throw error;
+      } finally {
+        client.release();
+      }
+    },
+
+    async getTweakAttempts(submissionId) {
+      assertOpen();
+      const result = await database.query(
+        `
+          SELECT
+            id,
+            submission_id,
+            attempt_index,
+            token_index,
+            original_token,
+            replacement_text,
+            before_sentence,
+            after_sentence,
+            before_score,
+            after_score,
+            challenge_passed,
+            created_at
+          FROM tweak_attempts
+          WHERE submission_id = $1
+          ORDER BY attempt_index
+        `,
+        [validatePositiveId(submissionId, "submissionId")],
+      );
+      return result.rows.map(normalizeTweakAttemptRow);
     },
 
     async count() {

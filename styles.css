@@ -1998,7 +1998,6 @@ input[type="range"] {
   .classification-top { flex-direction: column; }
   .confidence-badge { order: -1; }
   .results-actions { flex-direction: column; gap: 14px; }
-  .results-actions .text-button { order: 2; }
   .site-footer span:first-child { display: none; }
 }
 

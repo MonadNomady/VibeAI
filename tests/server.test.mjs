@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { newDb } from "pg-mem";
 import { createVibeCheckServer } from "../server.mjs";
-import { tokenizeSentence } from "../sentiment.js";
+import { analyzeSentiment, tokenizeSentence } from "../sentiment.js";
 import { createSentenceStore } from "../storage.mjs";
 
 function listen(server) {
@@ -148,8 +148,25 @@ function postSentence(baseUrl, value, cookie) {
 }
 
 function putScaleResult(baseUrl, submissionId, value, cookie, contentType = "application/json") {
+  const body = value && !Array.isArray(value) && typeof value === "object"
+    ? { confidencePercent: 70, ...value }
+    : value;
   return fetch(`${baseUrl}/api/sentences/${submissionId}/scale-result`, {
     method: "PUT",
+    headers: requestHeaders(cookie, contentType),
+    body: JSON.stringify(body),
+  });
+}
+
+function postTweakAttempt(
+  baseUrl,
+  submissionId,
+  value,
+  cookie,
+  contentType = "application/json",
+) {
+  return fetch(`${baseUrl}/api/sentences/${submissionId}/tweak-attempts`, {
+    method: "POST",
     headers: requestHeaders(cookie, contentType),
     body: JSON.stringify(value),
   });
@@ -318,6 +335,7 @@ test("PUT scale-result stores ordered ratings and a server-derived challenge res
     submissionId,
     {
       ratings,
+      confidencePercent: 91,
       challengePassed: false,
       participantId: 0,
       tokenTexts: ["forged"],
@@ -331,14 +349,17 @@ test("PUT scale-result stores ordered ratings and a server-derived challenge res
     "challengePassed",
     "initialChallengePassed",
     "scaleSubmittedAt",
+    "vibeConfidencePercent",
   ]);
   assert.equal(result.initialChallengePassed, true);
   assert.equal(result.challengePassed, true);
+  assert.equal(result.vibeConfidencePercent, 91);
   assert.match(result.scaleSubmittedAt, /^\d{4}-\d{2}-\d{2}T/);
 
   const stored = await store.getById(submissionId);
   assert.equal(stored.initialChallengePassed, true);
   assert.equal(stored.challengePassed, true);
+  assert.equal(stored.vibeConfidencePercent, 91);
   assert.deepEqual(
     stored.wordPlacements,
     tokens.map((token, tokenIndex) => ({
@@ -363,6 +384,7 @@ test("PUT scale-result stores ordered ratings and a server-derived challenge res
   assert(replaced.wordPlacements.every(({ rating }) => rating === -1));
   assert.equal(replaced.initialChallengePassed, true);
   assert.equal(replaced.challengePassed, true);
+  assert.equal(replaced.vibeConfidencePercent, 70);
   assert.equal(replaced.challengeCompletedAt, stored.challengeCompletedAt);
   assert.equal(replaced.scaleSubmittedAt, stored.scaleSubmittedAt);
 });
@@ -440,6 +462,28 @@ test("PUT scale-result validates its method, media type, and rating list", async
     await response.text();
   }
 
+  for (const confidencePercent of [-1, 101, 1.5, "70", null]) {
+    const response = await putScaleResult(
+      baseUrl,
+      submissionId,
+      { ratings: tokens.map(() => 0), confidencePercent },
+      cookie,
+    );
+    assert.equal(response.status, 400, String(confidencePercent));
+    await response.text();
+  }
+
+  const missingConfidence = await fetch(
+    `${baseUrl}/api/sentences/${submissionId}/scale-result`,
+    {
+      method: "PUT",
+      headers: requestHeaders(cookie),
+      body: JSON.stringify({ ratings: tokens.map(() => 0) }),
+    },
+  );
+  assert.equal(missingConfidence.status, 400);
+  await missingConfidence.text();
+
   const wrongType = await putScaleResult(
     baseUrl,
     submissionId,
@@ -465,9 +509,9 @@ test("PUT scale-result validates its method, media type, and rating list", async
   assert.deepEqual(unchanged.wordPlacements, []);
 });
 
-test("a passing Tweak Lab sentence completes a failed initial challenge", async (t) => {
+test("POST tweak-attempts stores each derived change and completes a passing attempt", async (t) => {
   const { baseUrl, store } = await createFixture(t);
-  const { cookie } = await registerParticipant(baseUrl, "Tweak learner");
+  const { cookie } = await registerParticipant(baseUrl, "Tweak historian");
   const originalSentence = "The concert was fine.";
   const sentenceResponse = await postSentence(
     baseUrl,
@@ -475,64 +519,185 @@ test("a passing Tweak Lab sentence completes a failed initial challenge", async 
     cookie,
   );
   const submissionId = (await sentenceResponse.json()).id;
-  const ratings = tokenizeSentence(originalSentence).map(() => 0);
   const revealResponse = await putScaleResult(
     baseUrl,
     submissionId,
-    { ratings },
+    { ratings: tokenizeSentence(originalSentence).map(() => 0), confidencePercent: 63 },
     cookie,
   );
-
   assert.equal(revealResponse.status, 200);
-  const reveal = await revealResponse.json();
-  assert.equal(reveal.initialChallengePassed, false);
-  assert.equal(reveal.challengePassed, false);
+  await revealResponse.text();
 
-  const completionResponse = await putChallengeCompletion(
+  const firstResponse = await postTweakAttempt(
     baseUrl,
     submissionId,
     {
-      sentence: "The concert was amazing!",
-      challengePassed: false,
-      participantId: 0,
+      beforeSentence: originalSentence,
+      tokenIndex: 3,
+      replacementText: "average",
+      originalToken: "forged",
+      afterScore: 1,
+      challengePassed: true,
     },
     cookie,
   );
+  assert.equal(firstResponse.status, 201);
+  const first = await firstResponse.json();
+  assert.equal(first.attemptIndex, 1);
+  assert.equal(first.originalToken, "fine");
+  assert.equal(first.replacementText, "average");
+  assert.equal(first.afterSentence, "The concert was average .");
+  assert.equal(first.beforeScore, analyzeSentiment(originalSentence).score);
+  assert.equal(first.afterScore, analyzeSentiment(first.afterSentence).score);
+  assert.equal(first.attemptPassed, false);
+  assert.equal(first.challengePassed, false);
+  assert.equal(first.challengeCompletedAt, null);
 
-  assert.equal(completionResponse.status, 200);
-  const completion = await completionResponse.json();
-  assert.equal(completion.attemptPassed, true);
-  assert.equal(completion.challengePassed, true);
-  assert.match(completion.challengeCompletedAt, /^\d{4}-\d{2}-\d{2}T/);
-
-  const stored = await store.getById(submissionId);
-  assert.equal(stored.initialChallengePassed, false);
-  assert.equal(stored.challengePassed, true);
-  assert.equal(stored.challengeCompletedAt, completion.challengeCompletedAt);
-  assert.equal(stored.sentence, originalSentence);
-
-  await waitForClockTick();
-  const repeatedResponse = await putChallengeCompletion(
+  const secondResponse = await postTweakAttempt(
     baseUrl,
     submissionId,
-    { sentence: "This was wonderful!" },
+    {
+      beforeSentence: first.afterSentence,
+      tokenIndex: 3,
+      replacementText: "amazing",
+    },
     cookie,
   );
-  assert.equal(repeatedResponse.status, 200);
-  const repeated = await repeatedResponse.json();
-  assert.equal(repeated.attemptPassed, true);
-  assert.equal(repeated.challengePassed, true);
-  assert.equal(repeated.challengeCompletedAt, completion.challengeCompletedAt);
-  assert.equal(
-    (await store.getById(submissionId)).challengeCompletedAt,
-    completion.challengeCompletedAt,
+  assert.equal(secondResponse.status, 201);
+  const second = await secondResponse.json();
+  assert.equal(second.attemptIndex, 2);
+  assert.equal(second.originalToken, "average");
+  assert.equal(second.afterSentence, "The concert was amazing .");
+  assert.equal(second.attemptPassed, true);
+  assert.equal(second.challengePassed, true);
+  assert.match(second.challengeCompletedAt, /^\d{4}-\d{2}-\d{2}T/);
+
+  const attempts = await store.getTweakAttempts(submissionId);
+  assert.equal(attempts.length, 2);
+  assert.deepEqual(
+    attempts.map(({ attemptIndex, originalToken, replacementText, attemptPassed }) => ({
+      attemptIndex,
+      originalToken,
+      replacementText,
+      attemptPassed,
+    })),
+    [
+      { attemptIndex: 1, originalToken: "fine", replacementText: "average", attemptPassed: false },
+      { attemptIndex: 2, originalToken: "average", replacementText: "amazing", attemptPassed: true },
+    ],
   );
+  const submission = await store.getById(submissionId);
+  assert.equal(submission.initialChallengePassed, false);
+  assert.equal(submission.challengePassed, true);
+  assert.equal(submission.challengeCompletedAt, second.challengeCompletedAt);
+
+  const staleResponse = await postTweakAttempt(
+    baseUrl,
+    submissionId,
+    { beforeSentence: originalSentence, tokenIndex: 3, replacementText: "wonderful" },
+    cookie,
+  );
+  assert.equal(staleResponse.status, 409);
+  const stale = await staleResponse.json();
+  assert.equal(stale.currentSentence, second.afterSentence);
+  assert.equal(stale.challengePassed, true);
+  assert.equal((await store.getTweakAttempts(submissionId)).length, 2);
 });
 
-test("challenge completion is owner-only and ignores a forged pass for non-passing text", async (t) => {
+test("POST tweak-attempts requires ownership, a reveal, and valid replacement data", async (t) => {
   const { baseUrl, store } = await createFixture(t);
   const owner = await registerParticipant(baseUrl, "Tweak owner");
-  const otherLearner = await registerParticipant(baseUrl, "Other tweak learner");
+  const other = await registerParticipant(baseUrl, "Not tweak owner");
+  const sentence = "The concert happened.";
+  const sentenceResponse = await postSentence(
+    baseUrl,
+    { sentence, challengeId: "clear-vibe" },
+    owner.cookie,
+  );
+  const submissionId = (await sentenceResponse.json()).id;
+  const validAttempt = { beforeSentence: sentence, tokenIndex: 2, replacementText: "amazing" };
+
+  const signedOut = await postTweakAttempt(baseUrl, submissionId, validAttempt);
+  assert.equal(signedOut.status, 401);
+  await signedOut.text();
+  const notOwner = await postTweakAttempt(
+    baseUrl,
+    submissionId,
+    validAttempt,
+    other.cookie,
+  );
+  assert.equal(notOwner.status, 404);
+  await notOwner.text();
+  const beforeReveal = await postTweakAttempt(
+    baseUrl,
+    submissionId,
+    validAttempt,
+    owner.cookie,
+  );
+  assert.equal(beforeReveal.status, 409);
+  await beforeReveal.text();
+
+  await putScaleResult(
+    baseUrl,
+    submissionId,
+    { ratings: tokenizeSentence(sentence).map(() => 0) },
+    owner.cookie,
+  ).then((response) => response.text());
+
+  for (const value of [
+    { ...validAttempt, tokenIndex: -1 },
+    { ...validAttempt, tokenIndex: 99 },
+    { ...validAttempt, replacementText: " " },
+    { ...validAttempt, replacementText: "x".repeat(241) },
+    { ...validAttempt, beforeSentence: " " },
+  ]) {
+    const response = await postTweakAttempt(baseUrl, submissionId, value, owner.cookie);
+    assert.equal(response.status, 400, JSON.stringify(value));
+    await response.text();
+  }
+
+  const almostMaxSentence = Array.from({ length: 119 }, () => "a").join(" ");
+  assert.equal(almostMaxSentence.length, 237);
+  const longSentenceResponse = await postSentence(
+    baseUrl,
+    { sentence: almostMaxSentence, challengeId: "clear-vibe" },
+    owner.cookie,
+  );
+  assert.equal(longSentenceResponse.status, 201);
+  const longSubmissionId = (await longSentenceResponse.json()).id;
+  await putScaleResult(
+    baseUrl,
+    longSubmissionId,
+    { ratings: tokenizeSentence(almostMaxSentence).map(() => 0) },
+    owner.cookie,
+  ).then((response) => response.text());
+  const combinedTooLong = await postTweakAttempt(
+    baseUrl,
+    longSubmissionId,
+    {
+      beforeSentence: almostMaxSentence,
+      tokenIndex: 0,
+      replacementText: "abcdefghij",
+    },
+    owner.cookie,
+  );
+  assert.equal(combinedTooLong.status, 400);
+  assert.match((await combinedTooLong.json()).error, /240 characters or fewer/i);
+  assert.deepEqual(await store.getTweakAttempts(longSubmissionId), []);
+
+  const wrongMethod = await fetch(
+    `${baseUrl}/api/sentences/${submissionId}/tweak-attempts`,
+    { headers: { Cookie: owner.cookie } },
+  );
+  assert.equal(wrongMethod.status, 405);
+  assert.equal(wrongMethod.headers.get("allow"), "POST");
+  await wrongMethod.text();
+  assert.deepEqual(await store.getTweakAttempts(submissionId), []);
+});
+
+test("the legacy completion-only endpoint is retired so tweaks cannot skip history", async (t) => {
+  const { baseUrl, store } = await createFixture(t);
+  const owner = await registerParticipant(baseUrl, "Tweak historian");
   const originalSentence = "The concert happened.";
   const sentenceResponse = await postSentence(
     baseUrl,
@@ -550,40 +715,20 @@ test("challenge completion is owner-only and ignores a forged pass for non-passi
   assert.equal(revealResponse.status, 200);
   await revealResponse.text();
 
-  const signedOut = await putChallengeCompletion(
+  const retired = await putChallengeCompletion(
     baseUrl,
     submissionId,
     { sentence: "This was amazing!" },
-  );
-  assert.equal(signedOut.status, 401);
-  await signedOut.text();
-
-  const notOwner = await putChallengeCompletion(
-    baseUrl,
-    submissionId,
-    { sentence: "This was amazing!" },
-    otherLearner.cookie,
-  );
-  assert.equal(notOwner.status, 404);
-  await notOwner.text();
-
-  const nonPassing = await putChallengeCompletion(
-    baseUrl,
-    submissionId,
-    { sentence: "The concert happened.", challengePassed: true },
     owner.cookie,
   );
-  assert.equal(nonPassing.status, 200);
-  assert.deepEqual(await nonPassing.json(), {
-    attemptPassed: false,
-    challengePassed: false,
-    challengeCompletedAt: null,
-  });
+  assert.equal(retired.status, 410);
+  assert.match((await retired.json()).error, /retired|tweak lab/i);
 
   const unchanged = await store.getById(submissionId);
   assert.equal(unchanged.initialChallengePassed, false);
   assert.equal(unchanged.challengePassed, false);
   assert.equal(unchanged.challengeCompletedAt, null);
+  assert.deepEqual(await store.getTweakAttempts(submissionId), []);
 });
 
 test("two learners with the same name remain linked to different submissions", async (t) => {
