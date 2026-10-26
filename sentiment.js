@@ -603,16 +603,25 @@ export function tokenizeSentence(sentence = '') {
 }
 
 /**
- * Apply the classroom challenge rules to a word-model score. Keeping these
- * rules shared lets the browser and server report the same pass result.
+ * Apply the classroom challenge rules to a word-model score and its analyzed
+ * tokens. Keeping these rules shared lets the browser and server report the
+ * same pass result.
  */
-export function didPassChallenge(challengeId, score) {
+export function didPassChallenge(challengeId, score, tokens = []) {
   const numericScore = Number(score);
   if (!Number.isFinite(numericScore)) return false;
 
   if (challengeId === 'sarcasm') return numericScore > 0.15;
   if (challengeId === 'clear-vibe') return Math.abs(numericScore) >= 0.35;
-  if (challengeId === 'mixed') return Math.abs(numericScore) < 0.25;
+  if (challengeId === 'mixed') {
+    if (!Array.isArray(tokens)) return false;
+    const weights = tokens
+      .map((token) => Number(token?.weight))
+      .filter(Number.isFinite);
+    const hasPositiveCue = weights.some((weight) => weight > 0);
+    const hasNegativeCue = weights.some((weight) => weight < 0);
+    return hasPositiveCue && hasNegativeCue && Math.abs(numericScore) < 0.75;
+  }
   return false;
 }
 

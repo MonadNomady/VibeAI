@@ -388,7 +388,11 @@ async function handleScaleResultApi(request, response, store, submissionId) {
     const ratings = normalizeRatings(body.ratings, tokens.length);
     const vibeConfidencePercent = normalizeConfidencePercent(body.confidencePercent);
     const analysis = analyzeSentiment(submission.sentence);
-    const challengePassed = didPassChallenge(submission.challengeId, analysis.score);
+    const challengePassed = didPassChallenge(
+      submission.challengeId,
+      analysis.score,
+      analysis.tokens,
+    );
     const saved = await store.saveScaleResult({
       submissionId,
       participantId: session.participant.id,
@@ -470,7 +474,11 @@ async function handleTweakAttemptApi(request, response, store, submissionId) {
     );
     const beforeAnalysis = analyzeSentiment(beforeSentence);
     const afterAnalysis = analyzeSentiment(afterSentence);
-    const attemptPassed = didPassChallenge(submission.challengeId, afterAnalysis.score);
+    const attemptPassed = didPassChallenge(
+      submission.challengeId,
+      afterAnalysis.score,
+      afterAnalysis.tokens,
+    );
     const saved = await store.saveTweakAttempt({
       submissionId,
       participantId: session.participant.id,

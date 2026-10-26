@@ -389,6 +389,41 @@ test("PUT scale-result stores ordered ratings and a server-derived challenge res
   assert.equal(replaced.scaleSubmittedAt, stored.scaleSubmittedAt);
 });
 
+test("the mixed challenge requires balanced positive and negative model cues", async (t) => {
+  const { baseUrl, store } = await createFixture(t);
+  const { cookie } = await registerParticipant(baseUrl, "Mixed learner");
+  const cases = [
+    { sentence: "The book is on the table.", expectedPassed: false },
+    { sentence: "This is fine.", expectedPassed: false },
+    { sentence: "The game was fun and frustrating.", expectedPassed: true },
+    { sentence: "I am nervous about tomorrow but excited to begin.", expectedPassed: true },
+    { sentence: "I was nervous, but the day was wonderful and amazing.", expectedPassed: false },
+  ];
+
+  for (const { sentence, expectedPassed } of cases) {
+    const sentenceResponse = await postSentence(
+      baseUrl,
+      { sentence, challengeId: "mixed" },
+      cookie,
+    );
+    const submissionId = (await sentenceResponse.json()).id;
+    const tokens = tokenizeSentence(sentence);
+    const response = await putScaleResult(
+      baseUrl,
+      submissionId,
+      { ratings: tokens.map(() => 0), confidencePercent: 70 },
+      cookie,
+    );
+
+    assert.equal(response.status, 200);
+    const result = await response.json();
+    assert.equal(result.initialChallengePassed, expectedPassed, sentence);
+    assert.equal(result.challengePassed, expectedPassed, sentence);
+    const stored = await store.getById(submissionId);
+    assert.equal(stored.initialChallengePassed, expectedPassed, sentence);
+  }
+});
+
 test("PUT scale-result requires the submission owner", async (t) => {
   const { baseUrl, store } = await createFixture(t);
   const owner = await registerParticipant(baseUrl, "Submission owner");
@@ -602,6 +637,46 @@ test("POST tweak-attempts stores each derived change and completes a passing att
   assert.equal(stale.currentSentence, second.afterSentence);
   assert.equal(stale.challengePassed, true);
   assert.equal((await store.getTweakAttempts(submissionId)).length, 2);
+});
+
+test("a mixed Tweak Lab attempt passes only after it creates opposing cues", async (t) => {
+  const { baseUrl, store } = await createFixture(t);
+  const { cookie } = await registerParticipant(baseUrl, "Mixed tweaker");
+  const originalSentence = "The game was fun and ordinary.";
+  const sentenceResponse = await postSentence(
+    baseUrl,
+    { sentence: originalSentence, challengeId: "mixed" },
+    cookie,
+  );
+  const submissionId = (await sentenceResponse.json()).id;
+  const originalTokens = tokenizeSentence(originalSentence);
+  const revealResponse = await putScaleResult(
+    baseUrl,
+    submissionId,
+    { ratings: originalTokens.map(() => 0), confidencePercent: 70 },
+    cookie,
+  );
+  assert.equal(revealResponse.status, 200);
+  const reveal = await revealResponse.json();
+  assert.equal(reveal.initialChallengePassed, false);
+
+  const ordinaryIndex = originalTokens.findIndex((token) => token.normalized === "ordinary");
+  const attemptResponse = await postTweakAttempt(
+    baseUrl,
+    submissionId,
+    {
+      beforeSentence: originalSentence,
+      tokenIndex: ordinaryIndex,
+      replacementText: "frustrating",
+    },
+    cookie,
+  );
+
+  assert.equal(attemptResponse.status, 201);
+  const attempt = await attemptResponse.json();
+  assert.equal(attempt.attemptPassed, true);
+  assert.equal(attempt.challengePassed, true);
+  assert.equal((await store.getById(submissionId)).challengePassed, true);
 });
 
 test("POST tweak-attempts requires ownership, a reveal, and valid replacement data", async (t) => {

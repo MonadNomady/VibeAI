@@ -39,15 +39,23 @@ test('positive and negative language produce bounded, explainable results', () =
 });
 
 test('challenge pass rules are shared and preserve their score boundaries', () => {
+  const opposingCues = [{ weight: 0.5 }, { weight: -0.5 }];
+
   assert.equal(didPassChallenge('clear-vibe', 0.35), true);
   assert.equal(didPassChallenge('clear-vibe', -0.35), true);
   assert.equal(didPassChallenge('clear-vibe', 0.349), false);
   assert.equal(didPassChallenge('sarcasm', 0.151), true);
   assert.equal(didPassChallenge('sarcasm', 0.15), false);
-  assert.equal(didPassChallenge('mixed', 0.249), true);
-  assert.equal(didPassChallenge('mixed', -0.25), false);
+  assert.equal(didPassChallenge('mixed', 0.749, opposingCues), true);
+  assert.equal(didPassChallenge('mixed', -0.749, opposingCues), true);
+  assert.equal(didPassChallenge('mixed', 0.75, opposingCues), false);
+  assert.equal(didPassChallenge('mixed', -0.75, opposingCues), false);
+  assert.equal(didPassChallenge('mixed', 0), false);
+  assert.equal(didPassChallenge('mixed', 0, [{ weight: 0 }]), false);
+  assert.equal(didPassChallenge('mixed', 0.1, [{ weight: 0.5 }]), false);
+  assert.equal(didPassChallenge('mixed', -0.1, [{ weight: -0.5 }]), false);
   assert.equal(didPassChallenge('unknown', 0), false);
-  assert.equal(didPassChallenge('mixed', Number.NaN), false);
+  assert.equal(didPassChallenge('mixed', Number.NaN, opposingCues), false);
 });
 
 test('expanded classroom and social vocabulary is recognized', () => {
@@ -203,6 +211,7 @@ test('balanced opposing cues are reported as mixed or neutral', () => {
 
   assert.equal(result.label, 'neutral');
   assert(Math.abs(result.score) <= 0.12);
+  assert.equal(didPassChallenge('mixed', result.score, result.tokens), true);
   assert.match(result.summary, /mixed|balanced/i);
   assert(result.emotions.positive > 0);
   assert(result.emotions.negative > 0);
@@ -216,6 +225,7 @@ test('empty or unknown text returns a safe neutral result', () => {
     const result = analyzeSentiment(input);
     assert.equal(result.label, 'neutral');
     assert.equal(result.score, 0);
+    assert.equal(didPassChallenge('mixed', result.score, result.tokens), false);
     assert.equal(result.confidence, 0.35);
     assert.match(result.summary, /No strong/i);
   }

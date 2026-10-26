@@ -67,10 +67,10 @@ const challenges = [
     prompt: "Mix positive and negative clues together in the same sentence.",
     helper: "Try using “but” to show a change in feeling.",
     examples: [
-      "I loved the movie, but the ending was disappointing.",
-      "The trip was exhausting, yet I am so glad we went.",
-      "I am nervous about tomorrow but excited to begin.",
-      "The food looked awful, although it tasted fantastic.",
+      "The game was fun and exciting, but also frustrating.",
+      "I was nervous and worried, but the game was fun.",
+      "The movie was awful and boring, but the ending was good.",
+      "The movie was wonderful and amazing, but the ending was disappointing.",
     ],
   },
 ];
@@ -924,14 +924,20 @@ function formatSigned(value, digits = 2) {
   return value > 0 ? `+${rounded}` : rounded;
 }
 
-function challengeFeedback(label, score) {
+function challengeFeedback(score, passed, tokens = []) {
   const challenge = challenges[state.challengeIndex];
-  const normalizedLabel = label.toLowerCase();
   if (challenge.id === "sarcasm") {
     return "This model only follows visible word and emoji weights. It cannot know whether you meant the message sarcastically.";
   }
   if (challenge.id === "mixed") {
-    if (normalizedLabel.includes("mixed") || didPassChallenge("mixed", score)) return "The model noticed competing emotional clues—challenge complete.";
+    if (passed) return "The model noticed competing emotional clues—challenge complete.";
+    const hasPositiveCue = tokens.some((token) => tokenWeight(token) > 0);
+    const hasNegativeCue = tokens.some((token) => tokenWeight(token) < 0);
+    if (!hasPositiveCue && !hasNegativeCue) {
+      return "The model did not recognize an emotional clue yet. Include at least one positive and one negative clue.";
+    }
+    if (!hasPositiveCue) return "The model found a negative clue, but it still needs a recognized positive clue.";
+    if (!hasNegativeCue) return "The model found a positive clue, but it still needs a recognized negative clue.";
     return `The ${score > 0 ? "positive" : "negative"} clues dominated this sentence, so its mixed vibe was less visible.`;
   }
   const expected = score > 0.08 ? "positive" : score < -0.08 ? "negative" : "neutral";
@@ -1180,7 +1186,7 @@ function renderResults() {
   const summary = analysis.summary || `The model combined ${nonZeroTokens.length} emotional clue${nonZeroTokens.length === 1 ? "" : "s"} to place this message on the sentiment scale.`;
   const passed = typeof state.initialChallengePassed === "boolean"
     ? state.initialChallengePassed
-    : didPassChallenge(challenges[state.challengeIndex].id, score);
+    : didPassChallenge(challenges[state.challengeIndex].id, score, tokens);
   document.title = "VibeCheck — AI results";
 
   app.innerHTML = `
@@ -1214,7 +1220,7 @@ function renderResults() {
             </div>
             <div class="gauge-labels" aria-hidden="true"><span>−1.0 Negative</span><span>0 Neutral</span><span>+1.0 Positive</span></div>
           </div>
-          <div class="model-note"><strong>Challenge check:</strong> ${escapeHtml(challengeFeedback(label, score))}</div>
+          <div class="model-note"><strong>Challenge check:</strong> ${escapeHtml(challengeFeedback(score, passed, tokens))}</div>
         </article>
 
         <aside class="paper-card comparison-card">
@@ -1340,7 +1346,7 @@ function renderTweak() {
   const tweakedAnalysis = state.tweakedAnalysis ?? analyzeSentiment(state.tweakedSentence);
   const tweakedScore = tweakedAnalysis.score;
   const tweakedLabel = titleCase(tweakedAnalysis.label);
-  const isComplete = didPassChallenge(challenge.id, tweakedScore);
+  const isComplete = didPassChallenge(challenge.id, tweakedScore, tweakedAnalysis.tokens);
 
   app.innerHTML = `
     <section class="screen" aria-labelledby="tweak-title">
